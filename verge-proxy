@@ -1,0 +1,185 @@
+#!/usr/bin/env zsh
+
+# verge-proxy: Clash Verge 代理环境变量管理工具
+
+CLASH_CONFIG="$HOME/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev/config.yaml"
+ZSHRC="$HOME/.zshrc"
+INSTALL_MARKER="command verge-proxy"
+
+# ── 帮助信息 ─────────────────────────────────────────────────────────────────
+
+cmd_help() {
+  echo "用法: verge-proxy <命令>"
+  echo ""
+  echo "命令:"
+  echo "  start           读取 Clash Verge 端口，设置代理环境变量"
+  echo "  stop            移除代理环境变量"
+  echo "  restart         重新读取端口并更新代理环境变量"
+  echo ""
+  echo "选项:"
+  echo "  -i, --install   向 ~/.zshrc 写入 wrapper function（首次使用前请先执行）"
+  echo "  -h, --help      显示此帮助信息"
+  echo ""
+  echo "首次使用:"
+  echo "  1. verge-proxy --install"
+  echo "  2. source ~/.zshrc"
+  echo "  3. verge-proxy start"
+}
+
+# ── 安装 wrapper ──────────────────────────────────────────────────────────────
+
+cmd_install() {
+  local site_functions="$(brew --prefix)/share/zsh/site-functions"
+
+  # 写入 zsh 补全文件
+  cat > "$site_functions/_verge-proxy" << 'COMP'
+#compdef verge-proxy
+
+_verge-proxy() {
+  local -a commands
+  commands=(
+    'start:读取 Clash Verge 端口，设置代理环境变量'
+    'stop:移除代理环境变量'
+    'restart:重新读取端口并更新代理环境变量'
+  )
+
+  _arguments -s \
+    '(-i --install)'{-i,--install}'[向 ~/.zshrc 写入 wrapper function]' \
+    '(-h --help)'{-h,--help}'[显示帮助信息]' \
+    '1:command:->cmds' && return
+
+  case "$state" in
+    cmds) _describe 'command' commands ;;
+  esac
+}
+
+_verge-proxy "$@"
+COMP
+  echo "✓ 已写入补全文件: $site_functions/_verge-proxy"
+
+  # 写入 wrapper function
+  if grep -q "$INSTALL_MARKER" "$ZSHRC" 2>/dev/null; then
+    echo "verge-proxy wrapper 已安装，无需重复操作"
+    return 0
+  fi
+
+  cat >> "$ZSHRC" << 'EOF'
+
+# verge-proxy wrapper (added by verge-proxy --install)
+verge-proxy() {
+  case "$1" in
+    start|stop|restart) eval "$(command verge-proxy "$@")" ;;
+    *)      command verge-proxy "$@" ;;
+  esac
+}
+vp() {
+  (
+    eval "$(command verge-proxy restart)" >&2 || exit
+    if [[ -n ${aliases[$1]} ]]; then
+      eval "${aliases[$1]} ${(j: :)${(@q)@[2,-1]}}"
+    else
+      "$@"
+    fi
+  )
+}
+EOF
+
+  echo "✓ 已写入 ~/.zshrc，请执行 source ~/.zshrc 生效"
+}
+
+# ── 开启代理 ──────────────────────────────────────────────────────────────────
+
+_get_port() {
+  # 将端口写入调用方指定的变量名，错误时输出 eval 可执行的错误语句并 return 1
+  local _var="$1"
+
+  if [ ! -f "$CLASH_CONFIG" ]; then
+    echo "echo '错误: 找不到 Clash Verge 配置文件'"
+    echo "echo '路径: $CLASH_CONFIG'"
+    return 1
+  fi
+
+  local _port
+  _port=$(grep '^mixed-port:' "$CLASH_CONFIG" | sed 's/mixed-port:[[:space:]]*//' | tr -d '[:space:]')
+
+  if [ -z "$_port" ]; then
+    echo "echo '错误: 配置文件中未找到 mixed-port'"
+    return 1
+  fi
+
+  # 通过 typeset -g 把值设置到调用方的变量（在当前进程内，无子 shell）
+  typeset -g "$_var=$_port"
+}
+
+cmd_start() {
+  # 检查环境变量是否已被占用
+  local occupied=""
+  [ -n "$http_proxy" ]  && occupied="$occupied http_proxy"
+  [ -n "$https_proxy" ] && occupied="$occupied https_proxy"
+  [ -n "$all_proxy" ]   && occupied="$occupied all_proxy"
+
+  if [ -n "$occupied" ]; then
+    echo "echo '错误: 以下环境变量已被占用:$occupied'"
+    echo "echo '请先执行 verge-proxy stop 或手动 unset 后再试'"
+    echo "return 1 2>/dev/null || exit 1"
+    return
+  fi
+
+  local port
+  _get_port port || { echo "return 1 2>/dev/null || exit 1"; return; }
+
+  echo "export http_proxy=http://127.0.0.1:$port"
+  echo "export https_proxy=http://127.0.0.1:$port"
+  echo "export all_proxy=socks5://127.0.0.1:$port"
+  echo "export no_proxy=localhost,127.0.0.1"
+  echo "echo '✓ 代理已开启，端口: $port'"
+}
+
+# ── 关闭代理 ──────────────────────────────────────────────────────────────────
+
+cmd_stop() {
+  echo "unset http_proxy https_proxy all_proxy no_proxy"
+  echo "echo '✓ 代理环境变量已移除'"
+}
+
+# ── 重启代理 ──────────────────────────────────────────────────────────────────
+
+cmd_restart() {
+  local port
+  _get_port port || { echo "return 1 2>/dev/null || exit 1"; return; }
+
+  echo "export http_proxy=http://127.0.0.1:$port"
+  echo "export https_proxy=http://127.0.0.1:$port"
+  echo "export all_proxy=socks5://127.0.0.1:$port"
+  echo "export no_proxy=localhost,127.0.0.1"
+  echo "echo '✓ 代理已重启，端口: $port'"
+}
+
+# ── 参数分发 ──────────────────────────────────────────────────────────────────
+
+case "$1" in
+  start)
+    cmd_start
+    ;;
+  stop)
+    cmd_stop
+    ;;
+  restart)
+    cmd_restart
+    ;;
+  -i|--install)
+    cmd_install
+    ;;
+  -h|--help)
+    cmd_help
+    ;;
+  *)
+    if [ -z "$1" ]; then
+      echo "错误: 请提供命令" >&2
+    else
+      echo "错误: 未知参数 '$1'" >&2
+    fi
+    echo "使用 verge-proxy --help 查看使用说明" >&2
+    exit 1
+    ;;
+esac
