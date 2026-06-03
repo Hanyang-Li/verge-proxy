@@ -14,6 +14,16 @@ verge-proxy --install
 source ~/.zshrc
 ```
 
+`--install` 写入的 wrapper 区块由一对标记包裹:
+
+```
+# >>> verge-proxy >>>
+...
+# <<< verge-proxy <<<
+```
+
+升级新版本后再次执行 `verge-proxy --install` 会**整体替换标记之间的内容**(标记外的配置原样保留);若 `~/.zshrc` 中尚无该区块,则追加到文件末尾。因此可以反复执行,始终幂等。
+
 ## 用法
 
 ```sh

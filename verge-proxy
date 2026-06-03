@@ -4,7 +4,8 @@
 
 CLASH_CONFIG="$HOME/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev/config.yaml"
 ZSHRC="$HOME/.zshrc"
-INSTALL_MARKER="command verge-proxy"
+BLOCK_BEGIN="# >>> verge-proxy >>>"
+BLOCK_END="# <<< verge-proxy <<<"
 
 # ── 帮助信息 ─────────────────────────────────────────────────────────────────
 
@@ -17,7 +18,7 @@ cmd_help() {
   echo "  restart         重新读取端口并更新代理环境变量"
   echo ""
   echo "选项:"
-  echo "  -i, --install   向 ~/.zshrc 写入 wrapper function（首次使用前请先执行）"
+  echo "  -i, --install   向 ~/.zshrc 写入/更新 wrapper function（可重复执行以升级）"
   echo "  -h, --help      显示此帮助信息"
   echo ""
   echo "首次使用:"
@@ -57,34 +58,54 @@ _verge-proxy "$@"
 COMP
   echo "✓ 已写入补全文件: $site_functions/_verge-proxy"
 
-  # 写入 wrapper function
-  if grep -q "$INSTALL_MARKER" "$ZSHRC" 2>/dev/null; then
-    echo "verge-proxy wrapper 已安装，无需重复操作"
-    return 0
-  fi
-
-  cat >> "$ZSHRC" << 'EOF'
-
+  # 生成 wrapper 代码块（含起止标记），写入临时文件
+  local block
+  block=$(mktemp) || { echo "错误: 无法创建临时文件" >&2; return 1; }
+  cat > "$block" << EOF
+$BLOCK_BEGIN
 # verge-proxy wrapper (added by verge-proxy --install)
+# 此区块由 verge-proxy --install 管理，重新安装会整体覆盖标记之间的内容
 verge-proxy() {
-  case "$1" in
-    start|stop|restart) eval "$(command verge-proxy "$@")" ;;
-    *)      command verge-proxy "$@" ;;
+  case "\$1" in
+    start|stop|restart) eval "\$(command verge-proxy "\$@")" ;;
+    *)      command verge-proxy "\$@" ;;
   esac
 }
 vp() {
   (
-    eval "$(command verge-proxy restart)" >&2 || exit
-    if [[ -n ${aliases[$1]} ]]; then
-      eval "${aliases[$1]} ${(j: :)${(@q)@[2,-1]}}"
+    eval "\$(command verge-proxy restart)" >&2 || exit
+    if [[ -n \${aliases[\$1]} ]]; then
+      eval "\${aliases[\$1]} \${(j: :)\${(@q)@[2,-1]}}"
     else
-      "$@"
+      "\$@"
     fi
   )
 }
+$BLOCK_END
 EOF
 
-  echo "✓ 已写入 ~/.zshrc，请执行 source ~/.zshrc 生效"
+  # 若 ~/.zshrc 中已存在标记区块，则替换标记之间的内容；否则追加到末尾
+  if [ -f "$ZSHRC" ] && grep -qF "$BLOCK_BEGIN" "$ZSHRC" && grep -qF "$BLOCK_END" "$ZSHRC"; then
+    local tmp
+    tmp=$(mktemp) || { echo "错误: 无法创建临时文件" >&2; rm -f "$block"; return 1; }
+    awk -v begin="$BLOCK_BEGIN" -v end="$BLOCK_END" -v blockfile="$block" '
+      $0 == begin { print_block(); skip = 1; next }
+      $0 == end   { skip = 0; next }
+      !skip       { print }
+      function print_block(   line) {
+        while ((getline line < blockfile) > 0) print line
+        close(blockfile)
+      }
+    ' "$ZSHRC" > "$tmp" && cat "$tmp" > "$ZSHRC"
+    rm -f "$tmp"
+    echo "✓ 已更新 ~/.zshrc 中的 verge-proxy 区块，请执行 source ~/.zshrc 生效"
+  else
+    printf '\n' >> "$ZSHRC"
+    cat "$block" >> "$ZSHRC"
+    echo "✓ 已写入 ~/.zshrc，请执行 source ~/.zshrc 生效"
+  fi
+
+  rm -f "$block"
 }
 
 # ── 开启代理 ──────────────────────────────────────────────────────────────────
