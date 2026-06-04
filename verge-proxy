@@ -16,13 +16,14 @@ cmd_help() {
   echo "  start           读取 Clash Verge 端口，设置代理环境变量"
   echo "  stop            移除代理环境变量"
   echo "  restart         重新读取端口并更新代理环境变量"
+  echo "  port            输出 Clash Verge 端口号"
+  echo "  install         向 ~/.zshrc 写入/更新 wrapper function（可重复执行以升级）"
   echo ""
   echo "选项:"
-  echo "  -i, --install   向 ~/.zshrc 写入/更新 wrapper function（可重复执行以升级）"
   echo "  -h, --help      显示此帮助信息"
   echo ""
   echo "首次使用:"
-  echo "  1. verge-proxy --install"
+  echo "  1. verge-proxy install"
   echo "  2. source ~/.zshrc"
   echo "  3. verge-proxy start"
 }
@@ -42,10 +43,11 @@ _verge-proxy() {
     'start:读取 Clash Verge 端口，设置代理环境变量'
     'stop:移除代理环境变量'
     'restart:重新读取端口并更新代理环境变量'
+    'port:输出 Clash Verge 端口号'
+    'install:向 ~/.zshrc 写入 wrapper function'
   )
 
   _arguments -s \
-    '(-i --install)'{-i,--install}'[向 ~/.zshrc 写入 wrapper function]' \
     '(-h --help)'{-h,--help}'[显示帮助信息]' \
     '1:command:->cmds' && return
 
@@ -63,8 +65,8 @@ COMP
   block=$(mktemp) || { echo "错误: 无法创建临时文件" >&2; return 1; }
   cat > "$block" << EOF
 $BLOCK_BEGIN
-# verge-proxy wrapper (added by verge-proxy --install)
-# 此区块由 verge-proxy --install 管理，重新安装会整体覆盖标记之间的内容
+# verge-proxy wrapper (added by verge-proxy install)
+# 此区块由 verge-proxy install 管理，重新安装会整体覆盖标记之间的内容
 verge-proxy() {
   case "\$1" in
     start|stop|restart) eval "\$(command verge-proxy "\$@")" ;;
@@ -111,12 +113,13 @@ EOF
 # ── 开启代理 ──────────────────────────────────────────────────────────────────
 
 _get_port() {
-  # 将端口写入调用方指定的变量名，错误时输出 eval 可执行的错误语句并 return 1
+  # 将端口写入调用方指定的变量名，错误信息输出到 stderr 并 return 1。
+  # 唯一的端口数据源：start/restart/port 子命令均经此读取。
   local _var="$1"
 
   if [ ! -f "$CLASH_CONFIG" ]; then
-    echo "echo '错误: 找不到 Clash Verge 配置文件'"
-    echo "echo '路径: $CLASH_CONFIG'"
+    echo "错误: 找不到 Clash Verge 配置文件" >&2
+    echo "路径: $CLASH_CONFIG" >&2
     return 1
   fi
 
@@ -124,12 +127,18 @@ _get_port() {
   _port=$(grep '^mixed-port:' "$CLASH_CONFIG" | sed 's/mixed-port:[[:space:]]*//' | tr -d '[:space:]')
 
   if [ -z "$_port" ]; then
-    echo "echo '错误: 配置文件中未找到 mixed-port'"
+    echo "错误: 配置文件中未找到 mixed-port" >&2
     return 1
   fi
 
   # 通过 typeset -g 把值设置到调用方的变量（在当前进程内，无子 shell）
   typeset -g "$_var=$_port"
+}
+
+cmd_port() {
+  local port
+  _get_port port || return 1
+  echo "$port"
 }
 
 cmd_start() {
@@ -188,7 +197,10 @@ case "$1" in
   restart)
     cmd_restart
     ;;
-  -i|--install)
+  port)
+    cmd_port
+    ;;
+  install)
     cmd_install
     ;;
   -h|--help)
