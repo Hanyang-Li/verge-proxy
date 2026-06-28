@@ -15,7 +15,7 @@ use std::process::Command;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const DEFAULT_DELAY_TEST_URL: &str = "https://www.gstatic.com/generate_204";
 const DEFAULT_DELAY_TIMEOUT_MS: u64 = 2_000;
@@ -388,7 +388,11 @@ pub fn format_status_prompt(
     let mut current_width = initial_width;
     let terminal_width = terminal_width.max(20);
     for segment in segments {
-        if current_width > 0 && current_width + segment.width > terminal_width {
+        let segment = segment.fit_to_width(terminal_width);
+        if current_width > 0 && current_width + segment.width >= terminal_width {
+            if output.ends_with(' ') {
+                output.pop();
+            }
             output.push('\n');
             current_width = 0;
         }
@@ -400,6 +404,7 @@ pub fn format_status_prompt(
     output
 }
 
+#[derive(Clone)]
 struct PromptSegment {
     icon: String,
     value: String,
@@ -409,13 +414,32 @@ struct PromptSegment {
 
 impl PromptSegment {
     fn new(icon: &str, value: String, color: &'static str) -> Self {
+        let icon = normalize_prompt_text(icon);
+        let value = normalize_prompt_text(&value);
         let plain = format!(" {icon} {value} ");
         Self {
-            icon: icon.to_string(),
+            icon,
             value,
             color,
-            width: display_width(&plain),
+            width: prompt_display_width(&plain),
         }
+    }
+
+    fn fit_to_width(&self, max_width: usize) -> Self {
+        if self.width <= max_width {
+            return self.clone();
+        }
+
+        let empty_segment_width = prompt_display_width("   ");
+        let icon_budget = max_width.saturating_sub(empty_segment_width);
+        let icon = truncate_to_width(&self.icon, icon_budget);
+        let fixed_width = prompt_display_width(&format!(" {icon}  "));
+        let value_budget = max_width.saturating_sub(fixed_width);
+        Self::new(
+            &icon,
+            truncate_to_width(&self.value, value_budget),
+            self.color,
+        )
     }
 
     fn render(&self) -> String {
@@ -436,6 +460,57 @@ impl PromptSegment {
     }
 }
 
+fn normalize_prompt_text(input: &str) -> String {
+    input.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn prompt_display_width(input: &str) -> usize {
+    input.chars().map(prompt_char_width).sum()
+}
+
+fn prompt_char_width(ch: char) -> usize {
+    if is_private_use(ch) {
+        return 2;
+    }
+    UnicodeWidthChar::width(ch).unwrap_or(0)
+}
+
+fn is_private_use(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0xE000..=0xF8FF | 0xF0000..=0xFFFFD | 0x100000..=0x10FFFD
+    )
+}
+
+fn truncate_to_width(input: &str, max_width: usize) -> String {
+    if prompt_display_width(input) <= max_width {
+        return input.to_string();
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+
+    let marker = "…";
+    let marker_width = display_width(marker);
+    if max_width <= marker_width {
+        return marker.to_string();
+    }
+
+    let content_width = max_width - marker_width;
+    let mut output = String::new();
+    let mut width = 0;
+    for ch in input.chars() {
+        let ch_width = prompt_char_width(ch);
+        if width + ch_width > content_width {
+            break;
+        }
+        output.push(ch);
+        width += ch_width;
+    }
+    output.push_str(marker);
+    output
+}
+
 pub fn success_line(message: &str, status: Option<&StatusInfo>, prompt: &PromptConfig) -> String {
     let mut output = format!("{}✔{} {}", ANSI_BOLD_GREEN, ANSI_RESET, message);
     if let Some(status) = status {
@@ -444,7 +519,7 @@ pub fn success_line(message: &str, status: Option<&StatusInfo>, prompt: &PromptC
             status,
             prompt,
             terminal_width(),
-            display_width(message) + 2,
+            display_width(message) + 3,
         ));
     }
     output
@@ -458,7 +533,7 @@ pub fn error_line(message: &str, status: Option<&StatusInfo>, prompt: &PromptCon
             status,
             prompt,
             terminal_width(),
-            display_width(message) + 2,
+            display_width(message) + 3,
         ));
     }
     output
@@ -1348,13 +1423,13 @@ pub fn zsh_wrapper_block(exe: &str) -> String {
 # verge-proxy wrapper (added by verge-proxy install)
 verge-proxy() {{
   case "$1" in
-    start|stop|restart) eval "$("{exe}" "$@")" ;;
-    *) "{exe}" "$@" ;;
+    start|stop|restart) eval "$(COLUMNS=${{COLUMNS:-80}} "{exe}" "$@")" ;;
+    *) COLUMNS=${{COLUMNS:-80}} "{exe}" "$@" ;;
   esac
 }}
 vp() {{
   (
-    eval "$("{exe}" restart)" >&2 || exit
+    eval "$(COLUMNS=${{COLUMNS:-80}} "{exe}" restart)" >&2 || exit
     if [[ -n ${{aliases[$1]}} ]]; then
       eval "${{aliases[$1]}} ${{(j: :)${{(@q)@[2,-1]}}}}"
     else
@@ -1475,6 +1550,24 @@ pub fn proxies_from_pairs(pairs: &[(&str, &str, &[&str])]) -> HashMap<String, Pr
 mod tests {
     use super::*;
 
+    fn strip_ansi(input: &str) -> String {
+        let mut output = String::new();
+        let mut chars = input.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '\x1b' && chars.peek() == Some(&'[') {
+                chars.next();
+                for next in chars.by_ref() {
+                    if next.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+                continue;
+            }
+            output.push(ch);
+        }
+        output
+    }
+
     #[test]
     fn reads_port_from_controller_configs_without_hardcoding() {
         let configs = serde_json::json!({"mixed-port": 7899, "mode": "rule"});
@@ -1576,9 +1669,14 @@ mod tests {
     fn generated_zsh_wrapper_evals_environment_commands() {
         let block = zsh_wrapper_block("/usr/local/bin/verge-proxy");
         assert!(
-            block.contains(r#"start|stop|restart) eval "$("/usr/local/bin/verge-proxy" "$@")" ;;"#)
+            block.contains(
+                r#"start|stop|restart) eval "$(COLUMNS=${COLUMNS:-80} "/usr/local/bin/verge-proxy" "$@")" ;;"#
+            )
         );
-        assert!(block.contains(r#"eval "$("/usr/local/bin/verge-proxy" restart)" >&2 || exit"#));
+        assert!(block.contains(
+            r#"eval "$(COLUMNS=${COLUMNS:-80} "/usr/local/bin/verge-proxy" restart)" >&2 || exit"#
+        ));
+        assert!(block.contains(r#"*) COLUMNS=${COLUMNS:-80} "/usr/local/bin/verge-proxy" "$@" ;;"#));
         assert!(!block.contains("compinit"));
         assert!(!block.contains("site-functions"));
     }
@@ -1619,6 +1717,78 @@ mod tests {
             assert!(line.contains(''));
             assert!(line.contains(''));
         }
+    }
+
+    #[test]
+    fn status_prompt_truncates_long_segments_to_terminal_width() {
+        let info = StatusInfo {
+            mode: Mode::Rule,
+            group: "🔰 手动选择".to_string(),
+            node: "日本 A19 IPV6双栈本地路由-超长节点名称-用于验证不会段内折行".to_string(),
+            delay: Some(108),
+            port: 7897,
+        };
+        let prompt = format_status_prompt(&info, &PromptConfig::default(), 24, 0);
+        let plain = strip_ansi(&prompt);
+
+        assert!(plain.contains('…'));
+        for line in plain.lines() {
+            assert!(
+                display_width(line) <= 24,
+                "line width {} exceeded limit: {line}",
+                display_width(line)
+            );
+            assert!(line.contains(''));
+            assert!(line.contains(''));
+        }
+    }
+
+    #[test]
+    fn status_prompt_normalizes_embedded_newlines_in_segments() {
+        let info = StatusInfo {
+            mode: Mode::Rule,
+            group: "🔰 手动选择".to_string(),
+            node: "日本 A13\n电信优化路由".to_string(),
+            delay: Some(108),
+            port: 7897,
+        };
+        let prompt = format_status_prompt(&info, &PromptConfig::default(), 80, 0);
+        let plain = strip_ansi(&prompt);
+
+        assert!(plain.contains("日本 A13 电信优化路由"));
+        for line in plain.lines() {
+            assert!(line.contains(''));
+            assert!(line.contains(''));
+        }
+    }
+
+    #[test]
+    fn status_prompt_wraps_before_node_when_icon_widths_are_ambiguous() {
+        let info = StatusInfo {
+            mode: Mode::Rule,
+            group: "🔰 手动选择".to_string(),
+            node: "日本 A13 电信优化路由".to_string(),
+            delay: Some(208),
+            port: 7897,
+        };
+        let prompt = format_status_prompt(
+            &info,
+            &PromptConfig::default(),
+            80,
+            display_width("错误：已取消") + 3,
+        );
+        let plain = strip_ansi(&prompt);
+        let lines = plain.lines().collect::<Vec<_>>();
+
+        assert!(lines.len() >= 2, "plain prompt: {plain:?}");
+        assert!(
+            !lines[0].contains("日本 A13"),
+            "first line width {}, prompt width {}, line: {:?}",
+            display_width(lines[0]),
+            prompt_display_width(lines[0]),
+            lines[0]
+        );
+        assert!(lines[1].contains("日本 A13 电信优化路由"));
     }
 
     #[test]
