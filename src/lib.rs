@@ -9,6 +9,7 @@ use std::cmp::min;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::fs;
+use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{mpsc, Arc, Mutex};
@@ -137,7 +138,6 @@ pub fn selector_groups(proxies: &HashMap<String, Proxy>) -> Vec<String> {
 
 pub fn resolve_active_group_and_node(
     mode: &Mode,
-    configured_group: Option<&str>,
     proxies: &HashMap<String, Proxy>,
 ) -> (String, String) {
     if *mode == Mode::Direct {
@@ -145,18 +145,18 @@ pub fn resolve_active_group_and_node(
     }
 
     let global_now = proxies.get("GLOBAL").and_then(|proxy| proxy.now.as_deref());
-    let starting_group = configured_group
-        .filter(|name| proxies.contains_key(*name))
-        .map(str::to_string)
-        .or_else(|| {
-            global_now
-                .filter(|name| {
-                    proxies
-                        .get(*name)
-                        .is_some_and(|proxy| !proxy.all.is_empty())
-                })
-                .map(str::to_string)
+    if let Some(now) = global_now {
+        if proxies.get(now).is_none_or(|proxy| proxy.all.is_empty()) {
+            return ("GLOBAL".to_string(), now.to_string());
+        }
+    }
+    let starting_group = global_now
+        .filter(|name| {
+            proxies
+                .get(*name)
+                .is_some_and(|proxy| !proxy.all.is_empty())
         })
+        .map(str::to_string)
         .or_else(|| choose_default_group(proxies))
         .unwrap_or_else(|| "GLOBAL".to_string());
 
@@ -493,7 +493,6 @@ enum Commands {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 struct AppConfig {
-    active_group: Option<String>,
     filter: Option<String>,
     concurrency: Option<usize>,
     timeout_ms: Option<u64>,
@@ -507,8 +506,6 @@ struct Paths {
     clash_runtime_config: PathBuf,
     app_config_dir: PathBuf,
     app_config: PathBuf,
-    completion_dir: PathBuf,
-    completion_file: PathBuf,
     zshrc: PathBuf,
 }
 
@@ -550,7 +547,7 @@ pub fn run() -> Result<()> {
         Commands::Stop => cmd_stop(),
         Commands::Restart => cmd_restart(&paths, &app_config),
         Commands::Status => {
-            let info = collect_status(&paths, &app_config)?;
+            let info = collect_status(&paths)?;
             println!(
                 "{}",
                 format_status_prompt(&info, &app_config.prompt, terminal_width(), 0)
@@ -575,13 +572,10 @@ impl Paths {
         let clash_dir =
             home.join("Library/Application Support/io.github.clash-verge-rev.clash-verge-rev");
         let app_config_dir = home.join(".config/verge-proxy");
-        let completion_dir = app_config_dir.join("completions");
         Ok(Self {
             clash_config: clash_dir.join("config.yaml"),
             clash_runtime_config: clash_dir.join("clash-verge.yaml"),
             app_config: app_config_dir.join("config.yaml"),
-            completion_file: completion_dir.join("_verge-proxy"),
-            completion_dir,
             app_config_dir,
             zshrc: home.join(".zshrc"),
         })
@@ -631,7 +625,7 @@ fn emit_proxy_exports(paths: &Paths, app_config: &AppConfig, message: &str) -> R
     println!("export https_proxy=http://127.0.0.1:{port}");
     println!("export all_proxy=socks5://127.0.0.1:{port}");
     println!("export no_proxy=localhost,127.0.0.1");
-    let status = collect_status(paths, app_config).ok();
+    let status = collect_status(paths).ok();
     println!(
         "echo {}",
         shell_single_quote(&success_line(message, status.as_ref(), &app_config.prompt))
@@ -666,7 +660,7 @@ fn cmd_group(paths: &Paths, app_config: &AppConfig) -> Result<()> {
     let controller = Controller::discover(paths)?;
     let mode = controller.mode()?;
     if mode == Mode::Direct {
-        let status = collect_status(paths, app_config).ok();
+        let status = collect_status(paths).ok();
         println!(
             "{}",
             success_line("设置直连成功", status.as_ref(), &app_config.prompt)
@@ -682,8 +676,7 @@ fn cmd_group(paths: &Paths, app_config: &AppConfig) -> Result<()> {
     if groups.is_empty() {
         return Err(anyhow!("没有可切换的代理组"));
     }
-    let (current_group, _) =
-        resolve_active_group_and_node(&mode, app_config.active_group.as_deref(), &proxies);
+    let (current_group, _) = resolve_active_group_and_node(&mode, &proxies);
     let selected = match choose_from_list(
         "切换代理组",
         groups
@@ -697,7 +690,6 @@ fn cmd_group(paths: &Paths, app_config: &AppConfig) -> Result<()> {
         Err(error) => return print_interactive_error(paths, app_config, error),
     };
     controller.select_proxy("GLOBAL", &groups[selected])?;
-    write_active_group(paths, &groups[selected])?;
     Ok(())
 }
 
@@ -705,7 +697,7 @@ fn cmd_node(paths: &Paths, app_config: &AppConfig, filter: Option<&str>) -> Resu
     let controller = Controller::discover(paths)?;
     let mode = controller.mode()?;
     if mode == Mode::Direct {
-        let status = collect_status(paths, app_config).ok();
+        let status = collect_status(paths).ok();
         println!(
             "{}",
             success_line("设置直连成功", status.as_ref(), &app_config.prompt)
@@ -713,8 +705,7 @@ fn cmd_node(paths: &Paths, app_config: &AppConfig, filter: Option<&str>) -> Resu
         return Ok(());
     }
     let proxies = controller.proxies()?;
-    let (group, current_node) =
-        resolve_active_group_and_node(&mode, app_config.active_group.as_deref(), &proxies);
+    let (group, current_node) = resolve_active_group_and_node(&mode, &proxies);
     let all_nodes = leaf_nodes_for_group(&group, &proxies);
     let nodes = filter_nodes_by_keyword(&all_nodes, filter);
     if nodes.is_empty() {
@@ -722,7 +713,7 @@ fn cmd_node(paths: &Paths, app_config: &AppConfig, filter: Option<&str>) -> Resu
             "{}",
             error_line(
                 "错误：没有匹配节点",
-                collect_status(paths, app_config).ok().as_ref(),
+                collect_status(paths).ok().as_ref(),
                 &app_config.prompt
             )
         );
@@ -748,7 +739,7 @@ fn cmd_auto_node(paths: &Paths, app_config: &AppConfig, filter: Option<&str>) ->
     let controller = Controller::discover(paths)?;
     let mode = controller.mode()?;
     if mode == Mode::Direct {
-        let status = collect_status(paths, app_config).ok();
+        let status = collect_status(paths).ok();
         println!(
             "{}",
             success_line("设置直连成功", status.as_ref(), &app_config.prompt)
@@ -757,8 +748,7 @@ fn cmd_auto_node(paths: &Paths, app_config: &AppConfig, filter: Option<&str>) ->
     }
 
     let proxies = controller.proxies()?;
-    let (group, _) =
-        resolve_active_group_and_node(&mode, app_config.active_group.as_deref(), &proxies);
+    let (group, _) = resolve_active_group_and_node(&mode, &proxies);
     let nodes = leaf_nodes_for_group(&group, &proxies)
         .into_iter()
         .filter(|name| name != "DIRECT" && name != "REJECT")
@@ -796,7 +786,7 @@ fn cmd_auto_node(paths: &Paths, app_config: &AppConfig, filter: Option<&str>) ->
         )? {
             progress.finish();
             controller.select_proxy(&group, &best.node)?;
-            let status = collect_status(paths, app_config).ok();
+            let status = collect_status(paths).ok();
             println!(
                 "{}",
                 success_line("已自动选择", status.as_ref(), &app_config.prompt)
@@ -814,7 +804,7 @@ fn cmd_install(paths: &Paths) -> Result<()> {
         .with_context(|| format!("无法创建 {}", paths.app_config_dir.display()))?;
     let config_action = ensure_config_file(paths)?;
 
-    let completion_action = write_completion_file(paths)?;
+    let (completion_action, completion_path) = write_completion_file(paths)?;
     let zshrc_action = update_zshrc(paths)?;
     let prompt = PromptConfig::default();
     println!(
@@ -823,12 +813,7 @@ fn cmd_install(paths: &Paths) -> Result<()> {
     );
     println!(
         "{}",
-        install_line(
-            completion_action,
-            "补全配置",
-            &paths.completion_file,
-            &prompt
-        )
+        install_line(completion_action, "补全配置", &completion_path, &prompt)
     );
     println!(
         "{}",
@@ -837,13 +822,12 @@ fn cmd_install(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
-fn collect_status(paths: &Paths, app_config: &AppConfig) -> Result<StatusInfo> {
+fn collect_status(paths: &Paths) -> Result<StatusInfo> {
     let port = read_port(paths)?;
     let controller = Controller::discover(paths)?;
     let mode = controller.mode()?;
     let proxies = controller.proxies()?;
-    let (group, node) =
-        resolve_active_group_and_node(&mode, app_config.active_group.as_deref(), &proxies);
+    let (group, node) = resolve_active_group_and_node(&mode, &proxies);
     let delay_target = if mode == Mode::Direct {
         "DIRECT"
     } else {
@@ -1126,7 +1110,7 @@ fn print_interactive_error(
     app_config: &AppConfig,
     error: anyhow::Error,
 ) -> Result<()> {
-    let status = collect_status(paths, app_config).ok();
+    let status = collect_status(paths).ok();
     let message = if error.to_string().contains("已取消") {
         "错误：已取消".to_string()
     } else {
@@ -1196,13 +1180,14 @@ fn ensure_config_file(paths: &Paths) -> Result<InstallAction> {
 }
 
 pub fn ensure_prompt_defaults(input: &str) -> String {
+    let input = remove_active_group_config(input);
     if input
         .lines()
         .any(|line| line.trim_start().starts_with("prompt:"))
     {
-        return input.to_string();
+        return input;
     }
-    let mut output = input.to_string();
+    let mut output = input;
     if !output.ends_with('\n') {
         output.push('\n');
     }
@@ -1218,31 +1203,30 @@ pub fn ensure_prompt_defaults(input: &str) -> String {
     output
 }
 
-fn write_active_group(paths: &Paths, group: &str) -> Result<()> {
-    fs::create_dir_all(&paths.app_config_dir)?;
-    let mut config = read_app_config(paths).unwrap_or_default();
-    config.active_group = Some(group.to_string());
-    let filter = config.filter.unwrap_or_default();
-    let input = format!(
-        "active_group: {}\nfilter: {}\nconcurrency: {}\ntimeout_ms: {}\n",
-        serde_yaml::to_string(group)?.trim(),
-        serde_yaml::to_string(&filter)?.trim(),
-        config.concurrency.unwrap_or(DEFAULT_CONCURRENCY),
-        config.timeout_ms.unwrap_or(DEFAULT_DELAY_TIMEOUT_MS)
-    );
-    fs::write(&paths.app_config, input)?;
-    Ok(())
+pub fn remove_active_group_config(input: &str) -> String {
+    let mut output = input
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("active_group:"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if input.ends_with('\n') && !output.is_empty() {
+        output.push('\n');
+    }
+    output
 }
 
-fn write_completion_file(paths: &Paths) -> Result<InstallAction> {
-    let action = if paths.completion_file.exists() {
+fn write_completion_file(paths: &Paths) -> Result<(InstallAction, PathBuf)> {
+    let source_dir = paths.app_config_dir.join("completions");
+    let source_file = source_dir.join("_verge-proxy");
+    let target_file = completion_site_functions_dir()?.join("_verge-proxy");
+    let action = if target_file.exists() {
         InstallAction::Updated
     } else {
         InstallAction::Set
     };
-    fs::create_dir_all(&paths.completion_dir)?;
+    fs::create_dir_all(&source_dir)?;
     fs::write(
-        &paths.completion_file,
+        &source_file,
         r#"#compdef verge-proxy
 
 _verge-proxy() {
@@ -1277,7 +1261,41 @@ _verge-proxy() {
 _verge-proxy "$@"
 "#,
     )?;
-    Ok(action)
+    fs::create_dir_all(
+        target_file
+            .parent()
+            .ok_or_else(|| anyhow!("无法定位 zsh site-functions 目录"))?,
+    )?;
+    if target_file.exists() || fs::symlink_metadata(&target_file).is_ok() {
+        fs::remove_file(&target_file)
+            .with_context(|| format!("无法移除旧补全配置 {}", target_file.display()))?;
+    }
+    unix_fs::symlink(&source_file, &target_file).with_context(|| {
+        format!(
+            "无法创建补全软链接 {} -> {}",
+            target_file.display(),
+            source_file.display()
+        )
+    })?;
+    Ok((action, target_file))
+}
+
+fn completion_site_functions_dir() -> Result<PathBuf> {
+    let output = Command::new("brew")
+        .arg("--prefix")
+        .output()
+        .context("无法执行 brew --prefix")?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "brew --prefix 失败: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let prefix = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if prefix.is_empty() {
+        return Err(anyhow!("brew --prefix 返回空路径"));
+    }
+    Ok(PathBuf::from(prefix).join("share/zsh/site-functions"))
 }
 
 fn update_zshrc(paths: &Paths) -> Result<InstallAction> {
@@ -1312,8 +1330,7 @@ pub fn install_line(
 }
 
 fn default_config_file() -> &'static str {
-    r#"active_group: "🔰 手动选择"
-filter: ""
+    r#"filter: ""
 concurrency: 20
 timeout_ms: 2000
 prompt:
@@ -1345,11 +1362,6 @@ vp() {{
     fi
   )
 }}
-if [[ -d "$HOME/.config/verge-proxy/completions" ]]; then
-  fpath=("$HOME/.config/verge-proxy/completions" $fpath)
-fi
-autoload -Uz compinit
-compinit
 {BLOCK_END}
 "#
     )
@@ -1491,8 +1503,20 @@ mod tests {
             ("🔰 手动选择", "日本 A19", &["日本 A19", "新加坡 B01"]),
         ]);
         assert_eq!(
-            resolve_active_group_and_node(&Mode::Rule, None, &proxies),
+            resolve_active_group_and_node(&Mode::Rule, &proxies),
             ("🔰 手动选择".to_string(), "日本 A19".to_string())
+        );
+    }
+
+    #[test]
+    fn resolves_leaf_global_now_as_global_group() {
+        let proxies = proxies_from_pairs(&[
+            ("GLOBAL", "日本 A19", &["DIRECT", "🔰 手动选择", "日本 A19"]),
+            ("🔰 手动选择", "新加坡 B01", &["日本 A19", "新加坡 B01"]),
+        ]);
+        assert_eq!(
+            resolve_active_group_and_node(&Mode::Global, &proxies),
+            ("GLOBAL".to_string(), "日本 A19".to_string())
         );
     }
 
@@ -1503,7 +1527,7 @@ mod tests {
             ("🔰 手动选择", "日本 A19", &["日本 A19"]),
         ]);
         assert_eq!(
-            resolve_active_group_and_node(&Mode::Direct, Some("🔰 手动选择"), &proxies),
+            resolve_active_group_and_node(&Mode::Direct, &proxies),
             ("DIRECT".to_string(), "DIRECT".to_string())
         );
     }
@@ -1555,6 +1579,8 @@ mod tests {
             block.contains(r#"start|stop|restart) eval "$("/usr/local/bin/verge-proxy" "$@")" ;;"#)
         );
         assert!(block.contains(r#"eval "$("/usr/local/bin/verge-proxy" restart)" >&2 || exit"#));
+        assert!(!block.contains("compinit"));
+        assert!(!block.contains("site-functions"));
     }
 
     #[test]
@@ -1644,11 +1670,20 @@ mod tests {
     fn install_adds_prompt_defaults_to_existing_config_without_overwriting() {
         let existing = "active_group: 🔰 手动选择\nfilter: ''\n";
         let updated = ensure_prompt_defaults(existing);
-        assert!(updated.contains("active_group: 🔰 手动选择"));
+        assert!(!updated.contains("active_group:"));
         assert!(updated.contains("prompt:"));
         assert!(updated.contains("mode_icon"));
 
         let custom = "prompt:\n  mode_icon: X\n";
         assert_eq!(ensure_prompt_defaults(custom), custom);
+    }
+
+    #[test]
+    fn existing_prompt_config_still_drops_active_group() {
+        let existing = "active_group: old\nfilter: 日本\nprompt:\n  mode_icon: X\n";
+        let updated = ensure_prompt_defaults(existing);
+        assert!(!updated.contains("active_group:"));
+        assert!(updated.contains("filter: 日本"));
+        assert!(updated.contains("mode_icon: X"));
     }
 }
