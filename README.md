@@ -11,7 +11,7 @@ verge-proxy install
 source ~/.zshrc
 ```
 
-`install` 会创建/更新 `~/.config/verge-proxy/config.yaml`，写入 `~/.config/verge-proxy/completions/_verge-proxy`，并用标记区块更新 `~/.zshrc`：
+`install` 会创建/更新 `~/.config/verge-proxy/config.yaml`，生成 `~/.config/verge-proxy/completions/_verge-proxy`，并软链接到 `$(brew --prefix)/share/zsh/site-functions/_verge-proxy`。它也会用标记区块更新 `~/.zshrc` 中的 wrapper：
 
 ```text
 # >>> verge-proxy >>>
@@ -45,7 +45,6 @@ verge-proxy install    # 配置 ~/.config/verge-proxy、completion、~/.zshrc
 配置文件位于 `~/.config/verge-proxy/config.yaml`：
 
 ```yaml
-active_group: "🔰 手动选择"
 filter: "日本,新加坡"
 concurrency: 20
 timeout_ms: 2000
@@ -56,6 +55,8 @@ prompt:
   delay_icon: "󱎫"
   port_icon: "󰍍"
 ```
+
+当前 group/node 来自 Clash Verge controller 运行状态，不会写入 verge-proxy 配置文件。
 
 `auto-node` 会按逗号分隔的范围逐个匹配节点名。上一个范围没有可连通节点时，才测试下一个范围；所有范围都失败后再测试其他节点。
 
