@@ -1012,8 +1012,11 @@ fn collect_status(paths: &Paths) -> Result<StatusInfo> {
     } else {
         &node
     };
+    // 冷连接首次探测（拨号+TLS 握手）容易超过 2s 预算，失败后立即重试一次，
+    // 用热身后的连接拿到真实延迟
     let delay = controller
         .delay(delay_target, DEFAULT_DELAY_TIMEOUT_MS)
+        .or_else(|_| controller.delay(delay_target, DEFAULT_DELAY_TIMEOUT_MS))
         .ok();
     Ok(StatusInfo {
         mode,
