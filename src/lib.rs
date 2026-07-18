@@ -406,26 +406,64 @@ pub fn format_status_prompt(
         "#b4befe",
     ));
 
-    let mut output = String::new();
-    let mut current_width = initial_width;
+    // 布局：按宽度把 segments 分行，行首 segment 占完整双胶囊宽度，其余少一个左胶囊
     let terminal_width = terminal_width.max(20);
-    let mut line_start = true;
+    let mut lines: Vec<Vec<PromptSegment>> = Vec::new();
+    let mut current: Vec<PromptSegment> = Vec::new();
+    let mut current_width = initial_width;
     for segment in segments {
         let segment = segment.fit_to_width(terminal_width);
-        let mut width = segment.width;
-        if !line_start {
-            // 紧跟上一个 tag，不显示左胶囊
-            width = width.saturating_sub(1);
-        }
+        let width = if current.is_empty() {
+            segment.width
+        } else {
+            segment.width.saturating_sub(1)
+        };
         if current_width > 0 && current_width + width >= terminal_width {
-            output.push('\n');
+            lines.push(std::mem::take(&mut current));
             current_width = 0;
-            line_start = true;
-            width = segment.width;
         }
-        output.push_str(&segment.render(line_start));
+        let width = if current.is_empty() {
+            segment.width
+        } else {
+            segment.width.saturating_sub(1)
+        };
         current_width += width;
-        line_start = false;
+        current.push(segment);
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+
+    lines
+        .iter()
+        .map(|line| render_prompt_line(line))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 渲染一行 tags：行首显示左胶囊，相邻 segment 的右胶囊画在下一段背景上平滑衔接。
+fn render_prompt_line(segments: &[PromptSegment]) -> String {
+    let mut output = String::new();
+    for (index, segment) in segments.iter().enumerate() {
+        if index == 0 {
+            output.push_str(&ansi_fg(segment.color));
+            output.push('\u{e0b6}');
+        }
+        output.push_str(&ansi_bg_fg(segment.color, "#11111b"));
+        output.push(' ');
+        output.push_str(&segment.icon);
+        output.push(' ');
+        output.push_str(&segment.value);
+        output.push(' ');
+        if let Some(next) = segments.get(index + 1) {
+            output.push_str(&ansi_bg_fg(next.color, segment.color));
+            output.push('\u{e0b4}');
+        } else {
+            output.push_str(ANSI_RESET);
+            output.push_str(&ansi_fg(segment.color));
+            output.push('\u{e0b4}');
+            output.push_str(ANSI_RESET);
+        }
     }
     output
 }
@@ -466,25 +504,6 @@ impl PromptSegment {
             truncate_to_width(&self.value, value_budget),
             self.color,
         )
-    }
-
-    fn render(&self, line_start: bool) -> String {
-        let mut output = String::new();
-        if line_start {
-            output.push_str(&ansi_fg(self.color));
-            output.push('');
-        }
-        output.push_str(&ansi_bg_fg(self.color, "#11111b"));
-        output.push(' ');
-        output.push_str(&self.icon);
-        output.push(' ');
-        output.push_str(&self.value);
-        output.push(' ');
-        output.push_str(ANSI_RESET);
-        output.push_str(&ansi_fg(self.color));
-        output.push('');
-        output.push_str(ANSI_RESET);
-        output
     }
 }
 
@@ -2034,6 +2053,26 @@ mod tests {
         assert_eq!(plain.matches('\u{e0b6}').count(), 1);
         assert_eq!(plain.matches('\u{e0b4}').count(), 5);
         assert!(!plain.contains("\u{e0b4} \u{e0b6}"));
+    }
+
+    #[test]
+    fn status_prompt_blends_right_cap_into_next_segment_background() {
+        let info = StatusInfo {
+            mode: Mode::Rule,
+            group: "🔰 手动选择".to_string(),
+            node: "日本 A19".to_string(),
+            delay: Some(108),
+            port: 7897,
+        };
+        let prompt =
+            format_status_prompt(&info, &PromptConfig::default(), &TagDefaults::default(), 240, 0);
+
+        // 相邻 segment 的右胶囊：fg=当前段颜色，bg=下一段颜色，衔接处不 reset
+        assert!(prompt.contains(&format!("{}\u{e0b4}", ansi_bg_fg("#f9e2af", "#fab387"))));
+        assert!(prompt.contains(&format!("{}\u{e0b4}", ansi_bg_fg("#a6e3a1", "#f9e2af"))));
+        assert!(prompt.contains(&format!("{}\u{e0b4}", ansi_bg_fg("#74c7ec", "#a6e3a1"))));
+        // 行尾右胶囊画在默认背景上
+        assert!(prompt.ends_with(&format!("{}\u{e0b4}{ANSI_RESET}", ansi_fg("#b4befe"))));
     }
 
     #[test]
