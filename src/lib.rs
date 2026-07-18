@@ -19,6 +19,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const DEFAULT_DELAY_TEST_URL: &str = "https://www.gstatic.com/generate_204";
 const DEFAULT_DELAY_TIMEOUT_MS: u64 = 2_000;
+const DEFAULT_AUTO_NODE_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_CONCURRENCY: usize = 20;
 const BLOCK_BEGIN: &str = "# >>> verge-proxy >>>";
 const BLOCK_END: &str = "# <<< verge-proxy <<<";
@@ -71,12 +72,20 @@ pub struct Proxy {
     pub all: Vec<String>,
 }
 
+/// 延时段的显示状态：Hidden 不渲染该段，Timeout 渲染 timeout。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Delay {
+    Hidden,
+    Value(u64),
+    Timeout,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusInfo {
     pub mode: Mode,
     pub group: String,
     pub node: String,
-    pub delay: Option<u64>,
+    pub delay: Delay,
     pub port: u16,
 }
 
@@ -339,18 +348,18 @@ pub fn parse_proxies(value: serde_json::Value) -> anyhow::Result<HashMap<String,
 }
 
 pub fn format_status(info: &StatusInfo) -> String {
-    let delay = info
-        .delay
-        .map(|delay| format!("{delay}ms"))
-        .unwrap_or_else(|| "timeout".to_string());
-    [
+    let mut lines = vec![
         format!("mode: {}", info.mode.label()),
         format!("group: {}", info.group),
         format!("node: {}", info.node),
-        format!("delay: {delay}"),
-        format!("port: {}", info.port),
-    ]
-    .join("\n")
+    ];
+    match info.delay {
+        Delay::Hidden => {}
+        Delay::Value(delay) => lines.push(format!("delay: {delay}ms")),
+        Delay::Timeout => lines.push("delay: timeout".to_string()),
+    }
+    lines.push(format!("port: {}", info.port));
+    lines.join("\n")
 }
 
 pub fn format_status_prompt(
@@ -360,10 +369,6 @@ pub fn format_status_prompt(
     terminal_width: usize,
     initial_width: usize,
 ) -> String {
-    let delay = info
-        .delay
-        .map(|delay| format!("{delay}ms"))
-        .unwrap_or_else(|| "timeout".to_string());
     let hide_mode = defaults
         .mode
         .as_deref()
@@ -395,11 +400,18 @@ pub fn format_status_prompt(
         info.node.clone(),
         "#a6e3a1",
     ));
-    segments.push(PromptSegment::new(
-        prompt.delay_icon.as_deref().unwrap_or("󱎫"),
-        delay,
-        "#74c7ec",
-    ));
+    let delay = match info.delay {
+        Delay::Hidden => None,
+        Delay::Value(delay) => Some(format!("{delay}ms")),
+        Delay::Timeout => Some("timeout".to_string()),
+    };
+    if let Some(delay) = delay {
+        segments.push(PromptSegment::new(
+            prompt.delay_icon.as_deref().unwrap_or("󱎫"),
+            delay,
+            "#74c7ec",
+        ));
+    }
     segments.push(PromptSegment::new(
         prompt.port_icon.as_deref().unwrap_or("󰤨"),
         info.port.to_string(),
@@ -692,7 +704,7 @@ pub fn run() -> Result<()> {
         Commands::Stop => cmd_stop(),
         Commands::Restart => cmd_restart(&paths, &app_config),
         Commands::Status => {
-            let info = collect_status(&paths)?;
+            let info = collect_status(&paths, true)?;
             println!(
                 "{}",
                 format_status_prompt(
@@ -778,7 +790,7 @@ fn emit_proxy_exports(paths: &Paths, app_config: &AppConfig, message: &str) -> R
     println!("export https_proxy=http://127.0.0.1:{port}");
     println!("export all_proxy=socks5://127.0.0.1:{port}");
     println!("export no_proxy=localhost,127.0.0.1");
-    let status = collect_status(paths).ok();
+    let status = collect_status(paths, false).ok();
     println!(
         "echo {}",
         shell_single_quote(&success_line(
@@ -818,7 +830,7 @@ fn cmd_group(paths: &Paths, app_config: &AppConfig) -> Result<()> {
     let controller = Controller::discover(paths)?;
     let mode = controller.mode()?;
     if mode == Mode::Direct {
-        let status = collect_status(paths).ok();
+        let status = collect_status(paths, false).ok();
         println!(
             "{}",
             success_line(
@@ -860,7 +872,7 @@ fn cmd_node(paths: &Paths, app_config: &AppConfig, filter: Option<&str>) -> Resu
     let controller = Controller::discover(paths)?;
     let mode = controller.mode()?;
     if mode == Mode::Direct {
-        let status = collect_status(paths).ok();
+        let status = collect_status(paths, false).ok();
         println!(
             "{}",
             success_line(
@@ -881,7 +893,7 @@ fn cmd_node(paths: &Paths, app_config: &AppConfig, filter: Option<&str>) -> Resu
             "{}",
             error_line(
                 "错误：没有匹配节点",
-                collect_status(paths).ok().as_ref(),
+                collect_status(paths, false).ok().as_ref(),
                 &app_config.prompt,
                 &app_config.tag_defaults()
             )
@@ -908,7 +920,7 @@ fn cmd_auto_node(paths: &Paths, app_config: &AppConfig, filter: Option<&str>) ->
     let controller = Controller::discover(paths)?;
     let mode = controller.mode()?;
     if mode == Mode::Direct {
-        let status = collect_status(paths).ok();
+        let status = collect_status(paths, false).ok();
         println!(
             "{}",
             success_line(
@@ -941,9 +953,10 @@ fn cmd_auto_node(paths: &Paths, app_config: &AppConfig, filter: Option<&str>) ->
         .concurrency
         .unwrap_or(DEFAULT_CONCURRENCY)
         .clamp(1, 256);
+    // 单节点预算放宽到 5s：冷连接拨号+TLS 握手实测可达数秒
     let timeout_ms = app_config
         .timeout_ms
-        .unwrap_or(DEFAULT_DELAY_TIMEOUT_MS)
+        .unwrap_or(DEFAULT_AUTO_NODE_TIMEOUT_MS)
         .max(1);
 
     for (label, batch) in candidate_batches(&nodes, &ranges) {
@@ -960,7 +973,7 @@ fn cmd_auto_node(paths: &Paths, app_config: &AppConfig, filter: Option<&str>) ->
         )? {
             progress.finish();
             controller.select_proxy(&group, &best.node)?;
-            let status = collect_status(paths).ok();
+            let status = collect_status(paths, true).ok();
             println!(
                 "{}",
                 success_line(
@@ -1001,23 +1014,27 @@ fn cmd_install(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
-fn collect_status(paths: &Paths) -> Result<StatusInfo> {
+fn collect_status(paths: &Paths, probe_delay: bool) -> Result<StatusInfo> {
     let port = read_port(paths)?;
     let controller = Controller::discover(paths)?;
     let mode = controller.mode()?;
     let proxies = controller.proxies()?;
     let (group, node) = resolve_active_group_and_node(&mode, &proxies);
-    let delay_target = if mode == Mode::Direct {
-        "DIRECT"
+    let delay = if probe_delay {
+        let delay_target = if mode == Mode::Direct {
+            "DIRECT"
+        } else {
+            &node
+        };
+        // 冷连接首次探测（拨号+TLS 握手）容易超过 2s 预算，失败后立即重试一次
+        controller
+            .delay(delay_target, DEFAULT_DELAY_TIMEOUT_MS)
+            .or_else(|_| controller.delay(delay_target, DEFAULT_DELAY_TIMEOUT_MS))
+            .map(Delay::Value)
+            .unwrap_or(Delay::Timeout)
     } else {
-        &node
+        Delay::Hidden
     };
-    // 冷连接首次探测（拨号+TLS 握手）容易超过 2s 预算，失败后立即重试一次，
-    // 用热身后的连接拿到真实延迟
-    let delay = controller
-        .delay(delay_target, DEFAULT_DELAY_TIMEOUT_MS)
-        .or_else(|_| controller.delay(delay_target, DEFAULT_DELAY_TIMEOUT_MS))
-        .ok();
     Ok(StatusInfo {
         mode,
         group,
@@ -1292,7 +1309,7 @@ fn print_interactive_error(
     app_config: &AppConfig,
     error: anyhow::Error,
 ) -> Result<()> {
-    let status = collect_status(paths).ok();
+    let status = collect_status(paths, false).ok();
     let message = if error.to_string().contains("已取消") {
         "错误：已取消".to_string()
     } else {
@@ -1536,7 +1553,7 @@ pub fn install_line(
 fn default_config_file() -> &'static str {
     r#"filter: ""
 concurrency: 20
-timeout_ms: 2000
+timeout_ms: 5000
 mode: "rule"
 group: "🔰 手动选择"
 prompt:
@@ -1818,7 +1835,7 @@ mod tests {
             mode: Mode::Rule,
             group: "🔰 手动选择".to_string(),
             node: "日本 A19".to_string(),
-            delay: Some(108),
+            delay: Delay::Value(108),
             port: 7897,
         };
         let prompt = format_status_prompt(&info, &PromptConfig::default(), &TagDefaults::default(), 240, 0);
@@ -1839,7 +1856,7 @@ mod tests {
             mode: Mode::Rule,
             group: "🔰 手动选择".to_string(),
             node: "日本 A19 IPV6双栈本地路由".to_string(),
-            delay: Some(108),
+            delay: Delay::Value(108),
             port: 7897,
         };
         let prompt = format_status_prompt(&info, &PromptConfig::default(), &TagDefaults::default(), 24, 0);
@@ -1856,7 +1873,7 @@ mod tests {
             mode: Mode::Rule,
             group: "🔰 手动选择".to_string(),
             node: "日本 A19 IPV6双栈本地路由-超长节点名称-用于验证不会段内折行".to_string(),
-            delay: Some(108),
+            delay: Delay::Value(108),
             port: 7897,
         };
         let prompt = format_status_prompt(&info, &PromptConfig::default(), &TagDefaults::default(), 24, 0);
@@ -1880,7 +1897,7 @@ mod tests {
             mode: Mode::Rule,
             group: "🔰 手动选择".to_string(),
             node: "日本 A13\n电信优化路由".to_string(),
-            delay: Some(108),
+            delay: Delay::Value(108),
             port: 7897,
         };
         let prompt = format_status_prompt(&info, &PromptConfig::default(), &TagDefaults::default(), 80, 0);
@@ -1899,7 +1916,7 @@ mod tests {
             mode: Mode::Rule,
             group: "🔰 手动选择".to_string(),
             node: "日本 A13 电信优化路由".to_string(),
-            delay: Some(208),
+            delay: Delay::Value(208),
             port: 7897,
         };
         let prompt = format_status_prompt(
@@ -1929,7 +1946,7 @@ mod tests {
             mode: Mode::Direct,
             group: "DIRECT".to_string(),
             node: "DIRECT".to_string(),
-            delay: None,
+            delay: Delay::Timeout,
             port: 7897,
         };
         let prompt = PromptConfig::default();
@@ -2000,7 +2017,7 @@ mod tests {
             mode: Mode::Rule,
             group: "🔰 手动选择".to_string(),
             node: "日本 A19".to_string(),
-            delay: Some(108),
+            delay: Delay::Value(108),
             port: 7897,
         };
         let defaults = TagDefaults {
@@ -2025,7 +2042,7 @@ mod tests {
             mode: Mode::Global,
             group: "🚀 节点选择".to_string(),
             node: "日本 A19".to_string(),
-            delay: Some(108),
+            delay: Delay::Value(108),
             port: 7897,
         };
         let defaults = TagDefaults {
@@ -2045,7 +2062,7 @@ mod tests {
             mode: Mode::Rule,
             group: "🔰 手动选择".to_string(),
             node: "日本 A19".to_string(),
-            delay: Some(108),
+            delay: Delay::Value(108),
             port: 7897,
         };
         let prompt =
@@ -2059,12 +2076,31 @@ mod tests {
     }
 
     #[test]
+    fn status_prompt_omits_delay_segment_when_hidden() {
+        let info = StatusInfo {
+            mode: Mode::Rule,
+            group: "🔰 手动选择".to_string(),
+            node: "日本 A19".to_string(),
+            delay: Delay::Hidden,
+            port: 7897,
+        };
+        let prompt =
+            format_status_prompt(&info, &PromptConfig::default(), &TagDefaults::default(), 240, 0);
+        let plain = strip_ansi(&prompt);
+
+        assert!(!plain.contains("ms"));
+        assert!(!plain.contains("timeout"));
+        assert!(plain.contains("日本 A19"));
+        assert!(plain.contains("7897"));
+    }
+
+    #[test]
     fn status_prompt_blends_right_cap_into_next_segment_background() {
         let info = StatusInfo {
             mode: Mode::Rule,
             group: "🔰 手动选择".to_string(),
             node: "日本 A19".to_string(),
-            delay: Some(108),
+            delay: Delay::Value(108),
             port: 7897,
         };
         let prompt =
@@ -2084,7 +2120,7 @@ mod tests {
             mode: Mode::Rule,
             group: "🔰 手动选择".to_string(),
             node: "日本 A19".to_string(),
-            delay: Some(108),
+            delay: Delay::Value(108),
             port: 7897,
         };
         let prompt =

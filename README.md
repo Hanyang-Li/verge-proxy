@@ -46,6 +46,8 @@ verge-proxy install    # 配置 ~/.config/verge-proxy、completion、~/.zshrc
 
 `port` 和 `status` 的端口都动态读取：优先从 controller 的 `/configs["mixed-port"]` 获取，失败时回退到 Clash Verge 配置文件中的 `mixed-port`。
 
+delay 段只在 `status` 和 `auto-node` 显示：对当前节点实时探测（预算 2 秒，失败自动重试一次），两次都失败显示 `timeout`。`start`、`restart`、`mode`、`group`、`node` 不等待测速，也不显示 delay 段。
+
 `node --filter <关键字>` 会先按关键字筛选节点，再进入 `dialoguer::Select` 列表选择；选择器内部不做筛选。
 
 ## 配置
@@ -55,7 +57,7 @@ verge-proxy install    # 配置 ~/.config/verge-proxy、completion、~/.zshrc
 ```yaml
 filter: "日本,新加坡"
 concurrency: 20
-timeout_ms: 2000
+timeout_ms: 5000
 mode: "rule"
 group: "🔰 手动选择"
 prompt:
@@ -70,7 +72,7 @@ prompt:
 
 当前 group/node 来自 Clash Verge controller 运行状态，不会写入 verge-proxy 配置文件。
 
-`auto-node` 会按逗号分隔的范围逐个匹配节点名。上一个范围没有可连通节点时，才测试下一个范围；所有范围都失败后再测试其他节点。
+`auto-node` 会按逗号分隔的范围逐个匹配节点名。上一个范围没有可连通节点时，才测试下一个范围；所有范围都失败后再测试其他节点。单节点测速预算默认 5000ms（`timeout_ms`），覆盖冷连接的拨号与 TLS 握手时间。
 
 临时覆盖范围：
 
