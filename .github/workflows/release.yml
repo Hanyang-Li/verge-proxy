@@ -21,7 +21,7 @@ jobs:
             os: macos-13
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -39,7 +39,7 @@ jobs:
           shasum -a 256 "verge-proxy-${{ matrix.target }}.tar.gz" > "verge-proxy-${{ matrix.target }}.tar.gz.sha256"
 
       - name: Upload release assets
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             verge-proxy-${{ matrix.target }}.tar.gz
