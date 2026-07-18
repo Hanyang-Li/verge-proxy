@@ -89,6 +89,13 @@ pub struct PromptConfig {
     pub port_icon: Option<String>,
 }
 
+/// 当前 mode/group 等于默认值时隐藏对应 tag。
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct TagDefaults {
+    pub mode: Option<String>,
+    pub group: Option<String>,
+}
+
 pub fn port_from_configs_json(configs: &serde_json::Value) -> Option<u16> {
     configs
         .get("mixed-port")
@@ -349,6 +356,7 @@ pub fn format_status(info: &StatusInfo) -> String {
 pub fn format_status_prompt(
     info: &StatusInfo,
     prompt: &PromptConfig,
+    defaults: &TagDefaults,
     terminal_width: usize,
     initial_width: usize,
 ) -> String {
@@ -356,51 +364,69 @@ pub fn format_status_prompt(
         .delay
         .map(|delay| format!("{delay}ms"))
         .unwrap_or_else(|| "timeout".to_string());
-    let segments = [
-        PromptSegment::new(
+    let hide_mode = defaults
+        .mode
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|value| value == info.mode.api_value());
+    let hide_group = defaults
+        .group
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|value| value == info.group);
+
+    let mut segments = Vec::with_capacity(5);
+    if !hide_mode {
+        segments.push(PromptSegment::new(
             prompt.mode_icon.as_deref().unwrap_or("󰒓"),
             info.mode.label().to_string(),
             "#fab387",
-        ),
-        PromptSegment::new(
+        ));
+    }
+    if !hide_group {
+        segments.push(PromptSegment::new(
             prompt.group_icon.as_deref().unwrap_or("󰓹"),
             info.group.clone(),
             "#f9e2af",
-        ),
-        PromptSegment::new(
-            prompt.node_icon.as_deref().unwrap_or("󰤨"),
-            info.node.clone(),
-            "#a6e3a1",
-        ),
-        PromptSegment::new(
-            prompt.delay_icon.as_deref().unwrap_or("󱎫"),
-            delay,
-            "#74c7ec",
-        ),
-        PromptSegment::new(
-            prompt.port_icon.as_deref().unwrap_or("󰍍"),
-            info.port.to_string(),
-            "#b4befe",
-        ),
-    ];
+        ));
+    }
+    segments.push(PromptSegment::new(
+        prompt.node_icon.as_deref().unwrap_or("󰍍"),
+        info.node.clone(),
+        "#a6e3a1",
+    ));
+    segments.push(PromptSegment::new(
+        prompt.delay_icon.as_deref().unwrap_or("󱎫"),
+        delay,
+        "#74c7ec",
+    ));
+    segments.push(PromptSegment::new(
+        prompt.port_icon.as_deref().unwrap_or("󰤨"),
+        info.port.to_string(),
+        "#b4befe",
+    ));
 
     let mut output = String::new();
     let mut current_width = initial_width;
     let terminal_width = terminal_width.max(20);
+    let mut line_start = true;
     for segment in segments {
         let segment = segment.fit_to_width(terminal_width);
-        if current_width > 0 && current_width + segment.width >= terminal_width {
-            if output.ends_with(' ') {
-                output.pop();
-            }
+        let mut width = segment.width;
+        if !line_start {
+            // 紧跟上一个 tag，不显示左胶囊
+            width = width.saturating_sub(1);
+        }
+        if current_width > 0 && current_width + width >= terminal_width {
             output.push('\n');
             current_width = 0;
+            line_start = true;
+            width = segment.width;
         }
-        output.push_str(&segment.render());
-        output.push(' ');
-        current_width += segment.width + 1;
+        output.push_str(&segment.render(line_start));
+        current_width += width;
+        line_start = false;
     }
-    output.pop();
     output
 }
 
@@ -442,10 +468,12 @@ impl PromptSegment {
         )
     }
 
-    fn render(&self) -> String {
+    fn render(&self, line_start: bool) -> String {
         let mut output = String::new();
-        output.push_str(&ansi_fg(self.color));
-        output.push('');
+        if line_start {
+            output.push_str(&ansi_fg(self.color));
+            output.push('');
+        }
         output.push_str(&ansi_bg_fg(self.color, "#11111b"));
         output.push(' ');
         output.push_str(&self.icon);
@@ -511,13 +539,19 @@ fn truncate_to_width(input: &str, max_width: usize) -> String {
     output
 }
 
-pub fn success_line(message: &str, status: Option<&StatusInfo>, prompt: &PromptConfig) -> String {
+pub fn success_line(
+    message: &str,
+    status: Option<&StatusInfo>,
+    prompt: &PromptConfig,
+    defaults: &TagDefaults,
+) -> String {
     let mut output = format!("{}✔{} {}", ANSI_BOLD_GREEN, ANSI_RESET, message);
     if let Some(status) = status {
         output.push(' ');
         output.push_str(&format_status_prompt(
             status,
             prompt,
+            defaults,
             terminal_width(),
             display_width(message) + 3,
         ));
@@ -525,13 +559,19 @@ pub fn success_line(message: &str, status: Option<&StatusInfo>, prompt: &PromptC
     output
 }
 
-pub fn error_line(message: &str, status: Option<&StatusInfo>, prompt: &PromptConfig) -> String {
+pub fn error_line(
+    message: &str,
+    status: Option<&StatusInfo>,
+    prompt: &PromptConfig,
+    defaults: &TagDefaults,
+) -> String {
     let mut output = format!("{}✘{} {}", ANSI_BOLD_RED, ANSI_RESET, message);
     if let Some(status) = status {
         output.push(' ');
         output.push_str(&format_status_prompt(
             status,
             prompt,
+            defaults,
             terminal_width(),
             display_width(message) + 3,
         ));
@@ -571,8 +611,19 @@ struct AppConfig {
     filter: Option<String>,
     concurrency: Option<usize>,
     timeout_ms: Option<u64>,
+    mode: Option<String>,
+    group: Option<String>,
     #[serde(default)]
     prompt: PromptConfig,
+}
+
+impl AppConfig {
+    fn tag_defaults(&self) -> TagDefaults {
+        TagDefaults {
+            mode: self.mode.clone(),
+            group: self.group.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -625,7 +676,13 @@ pub fn run() -> Result<()> {
             let info = collect_status(&paths)?;
             println!(
                 "{}",
-                format_status_prompt(&info, &app_config.prompt, terminal_width(), 0)
+                format_status_prompt(
+                &info,
+                &app_config.prompt,
+                &app_config.tag_defaults(),
+                terminal_width(),
+                0,
+            )
             );
             Ok(())
         }
@@ -668,7 +725,8 @@ fn cmd_start(paths: &Paths, app_config: &AppConfig) -> Result<()> {
             shell_single_quote(&error_line(
                 "环境变量被占用，请执行 verge-proxy stop 后再次尝试",
                 None,
-                &app_config.prompt
+                &app_config.prompt,
+                &app_config.tag_defaults()
             ))
         );
         println!("return 1 2>/dev/null || exit 1");
@@ -684,7 +742,8 @@ fn cmd_stop() -> Result<()> {
         shell_single_quote(&success_line(
             "命令行代理已关闭，环境变量已移除",
             None,
-            &PromptConfig::default()
+            &PromptConfig::default(),
+            &TagDefaults::default()
         ))
     );
     Ok(())
@@ -703,7 +762,12 @@ fn emit_proxy_exports(paths: &Paths, app_config: &AppConfig, message: &str) -> R
     let status = collect_status(paths).ok();
     println!(
         "echo {}",
-        shell_single_quote(&success_line(message, status.as_ref(), &app_config.prompt))
+        shell_single_quote(&success_line(
+            message,
+            status.as_ref(),
+            &app_config.prompt,
+            &app_config.tag_defaults()
+        ))
     );
     Ok(())
 }
@@ -738,7 +802,12 @@ fn cmd_group(paths: &Paths, app_config: &AppConfig) -> Result<()> {
         let status = collect_status(paths).ok();
         println!(
             "{}",
-            success_line("设置直连成功", status.as_ref(), &app_config.prompt)
+            success_line(
+                "设置直连成功",
+                status.as_ref(),
+                &app_config.prompt,
+                &app_config.tag_defaults()
+            )
         );
         return Ok(());
     }
@@ -775,7 +844,12 @@ fn cmd_node(paths: &Paths, app_config: &AppConfig, filter: Option<&str>) -> Resu
         let status = collect_status(paths).ok();
         println!(
             "{}",
-            success_line("设置直连成功", status.as_ref(), &app_config.prompt)
+            success_line(
+                "设置直连成功",
+                status.as_ref(),
+                &app_config.prompt,
+                &app_config.tag_defaults()
+            )
         );
         return Ok(());
     }
@@ -789,7 +863,8 @@ fn cmd_node(paths: &Paths, app_config: &AppConfig, filter: Option<&str>) -> Resu
             error_line(
                 "错误：没有匹配节点",
                 collect_status(paths).ok().as_ref(),
-                &app_config.prompt
+                &app_config.prompt,
+                &app_config.tag_defaults()
             )
         );
         return Ok(());
@@ -817,7 +892,12 @@ fn cmd_auto_node(paths: &Paths, app_config: &AppConfig, filter: Option<&str>) ->
         let status = collect_status(paths).ok();
         println!(
             "{}",
-            success_line("设置直连成功", status.as_ref(), &app_config.prompt)
+            success_line(
+                "设置直连成功",
+                status.as_ref(),
+                &app_config.prompt,
+                &app_config.tag_defaults()
+            )
         );
         return Ok(());
     }
@@ -864,7 +944,12 @@ fn cmd_auto_node(paths: &Paths, app_config: &AppConfig, filter: Option<&str>) ->
             let status = collect_status(paths).ok();
             println!(
                 "{}",
-                success_line("已自动选择", status.as_ref(), &app_config.prompt)
+                success_line(
+                    "已自动选择",
+                    status.as_ref(),
+                    &app_config.prompt,
+                    &app_config.tag_defaults()
+                )
             );
             return Ok(());
         }
@@ -1193,7 +1278,12 @@ fn print_interactive_error(
     };
     println!(
         "{}",
-        error_line(&message, status.as_ref(), &app_config.prompt)
+        error_line(
+            &message,
+            status.as_ref(),
+            &app_config.prompt,
+            &app_config.tag_defaults()
+        )
     );
     Ok(())
 }
@@ -1246,7 +1336,7 @@ fn ensure_config_file(paths: &Paths) -> Result<InstallAction> {
 
     let input = fs::read_to_string(&paths.app_config)
         .with_context(|| format!("无法读取 {}", paths.app_config.display()))?;
-    let updated = ensure_prompt_defaults(&input);
+    let updated = ensure_config_defaults(&input);
     if updated != input {
         fs::write(&paths.app_config, updated)
             .with_context(|| format!("无法写入 {}", paths.app_config.display()))?;
@@ -1254,28 +1344,44 @@ fn ensure_config_file(paths: &Paths) -> Result<InstallAction> {
     Ok(InstallAction::Updated)
 }
 
-pub fn ensure_prompt_defaults(input: &str) -> String {
-    let input = remove_active_group_config(input);
-    if input
-        .lines()
-        .any(|line| line.trim_start().starts_with("prompt:"))
-    {
-        return input;
+/// 补齐缺失的默认配置：mode/group 默认值、prompt 图标，并移除废弃的 active_group。
+pub fn ensure_config_defaults(input: &str) -> String {
+    let mut output = remove_active_group_config(input);
+    if !config_has_key(&output, "mode:") {
+        push_config_line(&mut output, "mode: \"rule\"");
     }
-    let mut output = input;
+    if !config_has_key(&output, "group:") {
+        push_config_line(&mut output, "group: \"🔰 手动选择\"");
+    }
+    if !config_has_key(&output, "prompt:") {
+        push_config_line(
+            &mut output,
+            r#"prompt:
+  mode_icon: "󰒓"
+  group_icon: "󰓹"
+  node_icon: "󰍍"
+  delay_icon: "󱎫"
+  port_icon: "󰤨"
+"#,
+        );
+    }
+    output
+}
+
+fn config_has_key(input: &str, key: &str) -> bool {
+    input
+        .lines()
+        .any(|line| line.trim_start().starts_with(key))
+}
+
+fn push_config_line(output: &mut String, line: &str) {
     if !output.ends_with('\n') {
         output.push('\n');
     }
-    output.push_str(
-        r#"prompt:
-  mode_icon: "󰒓"
-  group_icon: "󰓹"
-  node_icon: "󰤨"
-  delay_icon: "󱎫"
-  port_icon: "󰍍"
-"#,
-    );
-    output
+    output.push_str(line);
+    if !output.ends_with('\n') {
+        output.push('\n');
+    }
 }
 
 pub fn remove_active_group_config(input: &str) -> String {
@@ -1401,6 +1507,7 @@ pub fn install_line(
         &format!("{}{}: {}", action.label(), name, path.display()),
         None,
         prompt,
+        &TagDefaults::default(),
     )
 }
 
@@ -1408,12 +1515,14 @@ fn default_config_file() -> &'static str {
     r#"filter: ""
 concurrency: 20
 timeout_ms: 2000
+mode: "rule"
+group: "🔰 手动选择"
 prompt:
   mode_icon: "󰒓"
   group_icon: "󰓹"
-  node_icon: "󰤨"
+  node_icon: "󰍍"
   delay_icon: "󱎫"
-  port_icon: "󰍍"
+  port_icon: "󰤨"
 "#
 }
 
@@ -1690,7 +1799,7 @@ mod tests {
             delay: Some(108),
             port: 7897,
         };
-        let prompt = format_status_prompt(&info, &PromptConfig::default(), 240, 0);
+        let prompt = format_status_prompt(&info, &PromptConfig::default(), &TagDefaults::default(), 240, 0);
         assert!(!prompt.contains("mode"));
         assert!(!prompt.contains("group"));
         assert!(!prompt.contains("node"));
@@ -1711,7 +1820,7 @@ mod tests {
             delay: Some(108),
             port: 7897,
         };
-        let prompt = format_status_prompt(&info, &PromptConfig::default(), 24, 0);
+        let prompt = format_status_prompt(&info, &PromptConfig::default(), &TagDefaults::default(), 24, 0);
         assert!(prompt.contains('\n'));
         for line in prompt.lines() {
             assert!(line.contains(''));
@@ -1728,7 +1837,7 @@ mod tests {
             delay: Some(108),
             port: 7897,
         };
-        let prompt = format_status_prompt(&info, &PromptConfig::default(), 24, 0);
+        let prompt = format_status_prompt(&info, &PromptConfig::default(), &TagDefaults::default(), 24, 0);
         let plain = strip_ansi(&prompt);
 
         assert!(plain.contains('…'));
@@ -1752,7 +1861,7 @@ mod tests {
             delay: Some(108),
             port: 7897,
         };
-        let prompt = format_status_prompt(&info, &PromptConfig::default(), 80, 0);
+        let prompt = format_status_prompt(&info, &PromptConfig::default(), &TagDefaults::default(), 80, 0);
         let plain = strip_ansi(&prompt);
 
         assert!(plain.contains("日本 A13 电信优化路由"));
@@ -1774,7 +1883,8 @@ mod tests {
         let prompt = format_status_prompt(
             &info,
             &PromptConfig::default(),
-            80,
+            &TagDefaults::default(),
+            60,
             display_width("错误：已取消") + 3,
         );
         let plain = strip_ansi(&prompt);
@@ -1801,8 +1911,8 @@ mod tests {
             port: 7897,
         };
         let prompt = PromptConfig::default();
-        assert!(success_line("设置直连成功", Some(&info), &prompt).starts_with(ANSI_BOLD_GREEN));
-        assert!(error_line("错误：已取消", Some(&info), &prompt).starts_with(ANSI_BOLD_RED));
+        assert!(success_line("设置直连成功", Some(&info), &prompt, &TagDefaults::default()).starts_with(ANSI_BOLD_GREEN));
+        assert!(error_line("错误：已取消", Some(&info), &prompt, &TagDefaults::default()).starts_with(ANSI_BOLD_RED));
     }
 
     #[test]
@@ -1839,21 +1949,110 @@ mod tests {
     #[test]
     fn install_adds_prompt_defaults_to_existing_config_without_overwriting() {
         let existing = "active_group: 🔰 手动选择\nfilter: ''\n";
-        let updated = ensure_prompt_defaults(existing);
+        let updated = ensure_config_defaults(existing);
         assert!(!updated.contains("active_group:"));
         assert!(updated.contains("prompt:"));
         assert!(updated.contains("mode_icon"));
 
-        let custom = "prompt:\n  mode_icon: X\n";
-        assert_eq!(ensure_prompt_defaults(custom), custom);
+        assert!(updated.contains("mode: \"rule\""));
+        assert!(updated.contains("group: \"🔰 手动选择\""));
+
+        let custom = "mode: global\ngroup: 其他\nprompt:\n  mode_icon: X\n";
+        assert_eq!(ensure_config_defaults(custom), custom);
     }
 
     #[test]
     fn existing_prompt_config_still_drops_active_group() {
         let existing = "active_group: old\nfilter: 日本\nprompt:\n  mode_icon: X\n";
-        let updated = ensure_prompt_defaults(existing);
+        let updated = ensure_config_defaults(existing);
         assert!(!updated.contains("active_group:"));
         assert!(updated.contains("filter: 日本"));
         assert!(updated.contains("mode_icon: X"));
+        assert!(updated.contains("mode: \"rule\""));
+        assert!(updated.contains("group: \"🔰 手动选择\""));
+    }
+
+    #[test]
+    fn status_prompt_hides_default_mode_and_group_tags() {
+        let info = StatusInfo {
+            mode: Mode::Rule,
+            group: "🔰 手动选择".to_string(),
+            node: "日本 A19".to_string(),
+            delay: Some(108),
+            port: 7897,
+        };
+        let defaults = TagDefaults {
+            mode: Some("rule".to_string()),
+            group: Some("🔰 手动选择".to_string()),
+        };
+        let prompt = format_status_prompt(&info, &PromptConfig::default(), &defaults, 240, 0);
+        let plain = strip_ansi(&prompt);
+
+        assert!(!plain.contains("规则"));
+        assert!(!plain.contains("手动选择"));
+        assert!(plain.contains("日本 A19"));
+        assert!(plain.contains("108ms"));
+        assert!(plain.contains("7897"));
+        // 首个可见 tag 仍显示左胶囊
+        assert!(plain.starts_with('\u{e0b6}'));
+    }
+
+    #[test]
+    fn status_prompt_keeps_non_default_mode_and_group_tags() {
+        let info = StatusInfo {
+            mode: Mode::Global,
+            group: "🚀 节点选择".to_string(),
+            node: "日本 A19".to_string(),
+            delay: Some(108),
+            port: 7897,
+        };
+        let defaults = TagDefaults {
+            mode: Some("rule".to_string()),
+            group: Some("🔰 手动选择".to_string()),
+        };
+        let prompt = format_status_prompt(&info, &PromptConfig::default(), &defaults, 240, 0);
+        let plain = strip_ansi(&prompt);
+
+        assert!(plain.contains("全局"));
+        assert!(plain.contains("🚀 节点选择"));
+    }
+
+    #[test]
+    fn status_prompt_joins_adjacent_tags_without_gap() {
+        let info = StatusInfo {
+            mode: Mode::Rule,
+            group: "🔰 手动选择".to_string(),
+            node: "日本 A19".to_string(),
+            delay: Some(108),
+            port: 7897,
+        };
+        let prompt =
+            format_status_prompt(&info, &PromptConfig::default(), &TagDefaults::default(), 240, 0);
+        let plain = strip_ansi(&prompt);
+
+        // 单行内只有第一个 tag 显示左胶囊，其余 tag 紧挨左侧 tag
+        assert_eq!(plain.matches('\u{e0b6}').count(), 1);
+        assert_eq!(plain.matches('\u{e0b4}').count(), 5);
+        assert!(!plain.contains("\u{e0b4} \u{e0b6}"));
+    }
+
+    #[test]
+    fn status_prompt_wrapped_lines_restart_with_left_capsule() {
+        let info = StatusInfo {
+            mode: Mode::Rule,
+            group: "🔰 手动选择".to_string(),
+            node: "日本 A19".to_string(),
+            delay: Some(108),
+            port: 7897,
+        };
+        let prompt =
+            format_status_prompt(&info, &PromptConfig::default(), &TagDefaults::default(), 24, 0);
+        let plain = strip_ansi(&prompt);
+
+        assert!(plain.lines().count() > 1);
+        for line in plain.lines() {
+            assert_eq!(line.matches('\u{e0b6}').count(), 1, "line: {line}");
+            assert!(line.contains('\u{e0b4}'));
+        }
     }
 }

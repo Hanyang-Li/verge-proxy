@@ -1,0 +1,53 @@
+#!/bin/sh
+# verge-proxy 安装脚本
+# 用法: curl -fsSL https://raw.githubusercontent.com/Hanyang-Li/verge-proxy/main/install.sh | sh
+set -eu
+
+REPO="Hanyang-Li/verge-proxy"
+BIN="verge-proxy"
+INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
+
+info() {
+  printf '\033[1;32m✔\033[0m %s\n' "$1"
+}
+
+fail() {
+  printf '\033[1;31m✘\033[0m %s\n' "$1" >&2
+  exit 1
+}
+
+[ "$(uname -s)" = "Darwin" ] || fail "仅支持 macOS"
+
+case "$(uname -m)" in
+  arm64) target="aarch64-apple-darwin" ;;
+  x86_64) target="x86_64-apple-darwin" ;;
+  *) fail "不支持的架构: $(uname -m)" ;;
+esac
+
+if [ -n "${VERSION:-}" ]; then
+  tag="$VERSION"
+else
+  tag=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" |
+    sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n 1)
+fi
+[ -n "$tag" ] || fail "无法获取最新版本号，可设置 VERSION=v0.2.0 后重试"
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+url="https://github.com/$REPO/releases/download/$tag/$BIN-$target.tar.gz"
+printf '下载 %s\n' "$url"
+curl -fsSL "$url" -o "$tmp/$BIN.tar.gz" || fail "下载失败: $url"
+tar -xzf "$tmp/$BIN.tar.gz" -C "$tmp"
+chmod +x "$tmp/$BIN"
+
+mkdir -p "$INSTALL_DIR" 2>/dev/null || true
+if [ -w "$INSTALL_DIR" ]; then
+  cp "$tmp/$BIN" "$INSTALL_DIR/$BIN"
+else
+  sudo cp "$tmp/$BIN" "$INSTALL_DIR/$BIN"
+fi
+info "已安装 $BIN $tag 到 $INSTALL_DIR/$BIN"
+
+"$INSTALL_DIR/$BIN" install
+info "完成。执行 source ~/.zshrc 或打开新终端后生效"
