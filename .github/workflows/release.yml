@@ -10,37 +10,30 @@ permissions:
 
 jobs:
   build:
-    name: ${{ matrix.target }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: aarch64-apple-darwin
-            os: macos-latest
-          - target: x86_64-apple-darwin
-            os: macos-13
-    runs-on: ${{ matrix.os }}
+    runs-on: macos-latest
+    env:
+      TARGET: aarch64-apple-darwin
     steps:
       - uses: actions/checkout@v7
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ env.TARGET }}
 
       - name: Build
-        run: cargo build --release --locked --target ${{ matrix.target }}
+        run: cargo build --release --locked --target ${{ env.TARGET }}
 
       - name: Package
         run: |
           mkdir dist
-          cp "target/${{ matrix.target }}/release/verge-proxy" dist/
-          tar -czf "verge-proxy-${{ matrix.target }}.tar.gz" -C dist verge-proxy
-          shasum -a 256 "verge-proxy-${{ matrix.target }}.tar.gz" > "verge-proxy-${{ matrix.target }}.tar.gz.sha256"
+          cp "target/${{ env.TARGET }}/release/verge-proxy" dist/
+          tar -czf "verge-proxy-${{ env.TARGET }}.tar.gz" -C dist verge-proxy
+          shasum -a 256 "verge-proxy-${{ env.TARGET }}.tar.gz" > "verge-proxy-${{ env.TARGET }}.tar.gz.sha256"
 
       - name: Upload release assets
         uses: softprops/action-gh-release@v3
         with:
           files: |
-            verge-proxy-${{ matrix.target }}.tar.gz
-            verge-proxy-${{ matrix.target }}.tar.gz.sha256
+            verge-proxy-${{ env.TARGET }}.tar.gz
+            verge-proxy-${{ env.TARGET }}.tar.gz.sha256

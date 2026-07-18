@@ -8,7 +8,7 @@ Clash Verge CLI。使用 Clash Verge/mihomo controller 读取运行状态、切�
 curl -fsSL https://raw.githubusercontent.com/Hanyang-Li/verge-proxy/main/install.sh | sh
 ```
 
-脚本会从 GitHub Releases 下载对应架构（Apple Silicon / Intel）的二进制到 `/usr/local/bin`，并执行 `verge-proxy install`。也可以设置 `VERSION=v0.2.0` 安装指定版本。
+脚本会从 GitHub Releases 下载 Apple Silicon（M 系列）二进制到 `/usr/local/bin`，并执行 `verge-proxy install`。也可以设置 `VERSION=v0.2.0` 安装指定版本。
 
 手动安装：
 
@@ -93,7 +93,7 @@ vp ggl
 
 ## 发布
 
-推送以 `v` 开头的 tag 会触发 GitHub Action，构建 `aarch64-apple-darwin` 和 `x86_64-apple-darwin` 的 release 二进制并上传到对应 Release：
+推送以 `v` 开头的 tag 会触发 GitHub Action，构建 `aarch64-apple-darwin`（Apple Silicon）的 release 二进制并上传到对应 Release：
 
 ```sh
 git tag v0.2.0

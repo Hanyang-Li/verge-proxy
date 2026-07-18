@@ -17,12 +17,8 @@ fail() {
 }
 
 [ "$(uname -s)" = "Darwin" ] || fail "仅支持 macOS"
-
-case "$(uname -m)" in
-  arm64) target="aarch64-apple-darwin" ;;
-  x86_64) target="x86_64-apple-darwin" ;;
-  *) fail "不支持的架构: $(uname -m)" ;;
-esac
+[ "$(uname -m)" = "arm64" ] || fail "仅支持 Apple Silicon (M 系列) Mac"
+target="aarch64-apple-darwin"
 
 if [ -n "${VERSION:-}" ]; then
   tag="$VERSION"
