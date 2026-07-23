@@ -745,7 +745,31 @@ impl Paths {
     }
 }
 
+/// Emits an error and returns `true` when `proxy_name` is set to a value other
+/// than `verge`. An unset or empty `proxy_name` is allowed (returns `false`).
+fn proxy_name_conflict(prompt: &PromptConfig, defaults: &TagDefaults) -> bool {
+    match env::var("proxy_name") {
+        Ok(value) if !value.is_empty() && value != "verge" => {
+            println!(
+                "echo {}",
+                shell_single_quote(&error_line(
+                    &format!("proxy_name 当前为 {value}，非 verge，拒绝操作"),
+                    None,
+                    prompt,
+                    defaults
+                ))
+            );
+            println!("return 1 2>/dev/null || exit 1");
+            true
+        }
+        _ => false,
+    }
+}
+
 fn cmd_start(paths: &Paths, app_config: &AppConfig) -> Result<()> {
+    if proxy_name_conflict(&app_config.prompt, &app_config.tag_defaults()) {
+        return Ok(());
+    }
     let occupied: Vec<_> = ["http_proxy", "https_proxy", "all_proxy"]
         .into_iter()
         .filter(|name| env::var_os(name).is_some())
@@ -767,7 +791,10 @@ fn cmd_start(paths: &Paths, app_config: &AppConfig) -> Result<()> {
 }
 
 fn cmd_stop() -> Result<()> {
-    println!("unset http_proxy https_proxy all_proxy no_proxy");
+    if proxy_name_conflict(&PromptConfig::default(), &TagDefaults::default()) {
+        return Ok(());
+    }
+    println!("unset http_proxy https_proxy all_proxy no_proxy proxy_name");
     println!(
         "echo {}",
         shell_single_quote(&success_line(
@@ -781,6 +808,9 @@ fn cmd_stop() -> Result<()> {
 }
 
 fn cmd_restart(paths: &Paths, app_config: &AppConfig) -> Result<()> {
+    if proxy_name_conflict(&app_config.prompt, &app_config.tag_defaults()) {
+        return Ok(());
+    }
     emit_proxy_exports(paths, app_config, "命令行代理已重启")
 }
 
@@ -790,6 +820,7 @@ fn emit_proxy_exports(paths: &Paths, app_config: &AppConfig, message: &str) -> R
     println!("export https_proxy=http://127.0.0.1:{port}");
     println!("export all_proxy=socks5://127.0.0.1:{port}");
     println!("export no_proxy=localhost,127.0.0.1");
+    println!("export proxy_name=verge");
     let status = collect_status(paths, false).ok();
     println!(
         "echo {}",
