@@ -1443,13 +1443,13 @@ impl Drop for Probe {
     }
 }
 
-/// 渲染一行测速进度：`<spinner> 节点延迟测试: {label}... {bar} {done}/{total}`。
+/// 渲染一行测速进度：`<spinner> 节点延迟测试: {label} {bar} {done}/{total}`。
 /// 进度条宽度随终端宽度自适应，先收缩进度条，实在放不下才截断标签，保证不换行。
 fn render_probe_line(spinner: &str, label: &str, done: u64, total: u64, width: usize) -> String {
     let width = width.max(10);
     let count = format!("{done}/{total}");
     let count_w = display_width(&count);
-    let prefix = format!("节点延迟测试: {label}...");
+    let prefix = format!("节点延迟测试: {label}");
     // "{spinner} {prefix} {bar} {count}" 中除 prefix/bar 外的固定宽度：spinner + 3 空格 + count
     let scaffold = 4 + count_w;
     let budget = width.saturating_sub(scaffold);
@@ -1940,7 +1940,7 @@ mod tests {
         let line = render_probe_line("⠋", "日本", 12, 36, 80);
         let plain = strip_ansi(&line);
         assert!(plain.starts_with("⠋ "));
-        assert!(plain.contains("节点延迟测试: 日本..."));
+        assert!(plain.contains("节点延迟测试: 日本"));
         assert!(plain.contains("12/36"));
         assert!(plain.contains('━') || plain.contains('─'));
     }
