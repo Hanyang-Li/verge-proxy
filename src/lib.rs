@@ -686,6 +686,8 @@ struct Paths {
     clash_runtime_config: PathBuf,
     app_config_dir: PathBuf,
     app_config: PathBuf,
+    data_dir: PathBuf,
+    zsh_functions_dir: PathBuf,
     zshrc: PathBuf,
 }
 
@@ -787,6 +789,8 @@ impl Paths {
             clash_runtime_config: clash_dir.join("clash-verge.yaml"),
             app_config: app_config_dir.join("config.yaml"),
             app_config_dir,
+            data_dir: home.join(".local/share/verge-proxy"),
+            zsh_functions_dir: home.join(".local/share/zsh/site-functions"),
             zshrc: home.join(".zshrc"),
         })
     }
@@ -1676,15 +1680,14 @@ pub fn remove_active_group_config(input: &str) -> String {
 }
 
 fn write_completion_file(paths: &Paths) -> Result<(InstallAction, PathBuf)> {
-    let source_dir = paths.app_config_dir.join("completions");
-    let source_file = source_dir.join("_verge-proxy");
-    let target_file = completion_site_functions_dir()?.join("_verge-proxy");
+    let source_file = paths.data_dir.join("_verge-proxy");
+    let target_file = paths.zsh_functions_dir.join("_verge-proxy");
     let action = if target_file.exists() {
         InstallAction::Updated
     } else {
         InstallAction::Set
     };
-    fs::create_dir_all(&source_dir)?;
+    fs::create_dir_all(&paths.data_dir)?;
     fs::write(
         &source_file,
         r#"#compdef verge-proxy
@@ -1721,11 +1724,7 @@ _verge-proxy() {
 _verge-proxy "$@"
 "#,
     )?;
-    fs::create_dir_all(
-        target_file
-            .parent()
-            .ok_or_else(|| anyhow!("无法定位 zsh site-functions 目录"))?,
-    )?;
+    fs::create_dir_all(&paths.zsh_functions_dir)?;
     if target_file.exists() || fs::symlink_metadata(&target_file).is_ok() {
         fs::remove_file(&target_file)
             .with_context(|| format!("无法移除旧补全配置 {}", target_file.display()))?;
@@ -1738,24 +1737,6 @@ _verge-proxy "$@"
         )
     })?;
     Ok((action, target_file))
-}
-
-fn completion_site_functions_dir() -> Result<PathBuf> {
-    let output = Command::new("brew")
-        .arg("--prefix")
-        .output()
-        .context("无法执行 brew --prefix")?;
-    if !output.status.success() {
-        return Err(anyhow!(
-            "brew --prefix 失败: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    let prefix = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if prefix.is_empty() {
-        return Err(anyhow!("brew --prefix 返回空路径"));
-    }
-    Ok(PathBuf::from(prefix).join("share/zsh/site-functions"))
 }
 
 fn update_zshrc(paths: &Paths) -> Result<InstallAction> {

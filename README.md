@@ -8,18 +8,19 @@ Clash Verge CLI。使用 Clash Verge/mihomo controller 读取运行状态、切�
 curl -fsSL https://raw.githubusercontent.com/Hanyang-Li/verge-proxy/main/install.sh | sh
 ```
 
-脚本会从 GitHub Releases 下载 Apple Silicon（M 系列）二进制到 `/usr/local/bin`，并执行 `verge-proxy install`。也可以设置 `VERSION=v0.2.0` 安装指定版本。
+脚本会从 GitHub Releases 下载 Apple Silicon（M 系列）二进制到 `~/.local/bin`（默认无需 sudo），校验 sha256，把 `~/.local/bin` 加入 PATH、`~/.local/share/zsh/site-functions` 加入 fpath，并执行 `verge-proxy install`。也可以设置 `VERSION=v1.0.0` 安装指定版本、`INSTALL_DIR=/path` 改安装目录、`NO_MODIFY_PATH=1` 跳过修改 shell rc。
 
 手动安装：
 
 ```sh
 cargo build --release
-sudo cp target/release/verge-proxy /usr/local/bin/verge-proxy
+mkdir -p ~/.local/bin
+cp target/release/verge-proxy ~/.local/bin/verge-proxy
 verge-proxy install
 source ~/.zshrc
 ```
 
-`install` 会创建/更新 `~/.config/verge-proxy/config.yaml`，生成 `~/.config/verge-proxy/completions/_verge-proxy`，并软链接到 `$(brew --prefix)/share/zsh/site-functions/_verge-proxy`。它也会用标记区块更新 `~/.zshrc` 中的 wrapper：
+`install` 会创建/更新 `~/.config/verge-proxy/config.yaml`，生成 `~/.local/share/verge-proxy/_verge-proxy`，并软链接到 `~/.local/share/zsh/site-functions/_verge-proxy`。它也会用标记区块更新 `~/.zshrc` 中的 wrapper：
 
 ```text
 # >>> verge-proxy >>>
