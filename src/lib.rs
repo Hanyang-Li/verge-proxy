@@ -1,7 +1,8 @@
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use dialoguer::{theme::ColorfulTheme, Select};
-use indicatif::{ProgressBar, ProgressStyle};
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::Deserialize;
 use serde_json::json;
@@ -9,9 +10,11 @@ use std::cmp::min;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::fs;
+use std::io::{IsTerminal, Write};
 use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -26,6 +29,14 @@ const BLOCK_END: &str = "# <<< verge-proxy <<<";
 const ANSI_RESET: &str = "\x1b[0m";
 const ANSI_BOLD_GREEN: &str = "\x1b[1;38;2;166;227;161m";
 const ANSI_BOLD_RED: &str = "\x1b[1;38;2;243;139;168m";
+const ANSI_SPINNER: &str = "\x1b[94m"; // 亮蓝
+const ANSI_BAR_FILLED: &str = "\x1b[36m"; // 青色，已完成
+const ANSI_BAR_EMPTY: &str = "\x1b[34m"; // 蓝色，未完成
+const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+fn spinner_frame(i: usize) -> &'static str {
+    SPINNER_FRAMES[i % SPINNER_FRAMES.len()]
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Mode {
@@ -619,21 +630,33 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// 开启命令行代理：读取端口并导出 http/https/all_proxy 环境变量
     Start,
+    /// 关闭命令行代理：移除代理相关环境变量
     Stop,
+    /// 重启命令行代理：重新读取端口并刷新环境变量
     Restart,
+    /// 查看当前状态：模式 / 代理组 / 节点 / 延迟 / 端口
     Status,
+    /// 交互切换代理模式：规则 / 全局 / 直连
     Mode,
+    /// 交互切换代理组
     Group,
+    /// 交互切换当前代理组下的节点
     Node {
+        /// 按关键字预筛节点（逗号分隔，任一命中即保留）
         #[arg(long)]
         filter: Option<String>,
     },
+    /// 输出当前 mixed-port 端口号
     Port,
+    /// 自动测速并切换到当前代理组中延迟最低的节点
     AutoNode {
+        /// 限制测速范围（逗号分隔，按顺序分批测试；测速时按 Esc 可跳过当前批次）
         #[arg(long)]
         filter: Option<String>,
     },
+    /// 安装 / 更新 shell 集成、命令补全与配置文件
     Install,
 }
 
@@ -990,19 +1013,14 @@ fn cmd_auto_node(paths: &Paths, app_config: &AppConfig, filter: Option<&str>) ->
         .unwrap_or(DEFAULT_AUTO_NODE_TIMEOUT_MS)
         .max(1);
 
+    // 整个测速过程只占一行：每批次共用同一行，Esc 跳过当前批次进入下一批次
     for (label, batch) in candidate_batches(&nodes, &ranges) {
         if batch.is_empty() {
             continue;
         }
-        let progress = progress_bar(&label, batch.len() as u64);
-        if let Some(best) = test_batch(
-            &controller,
-            batch,
-            concurrency,
-            timeout_ms,
-            Some(progress.clone()),
-        )? {
-            progress.finish();
+        if let BatchOutcome::Best(best) =
+            test_batch(&controller, batch, concurrency, timeout_ms, &label)
+        {
             controller.select_proxy(&group, &best.node)?;
             let status = collect_status(paths, true).ok();
             println!(
@@ -1016,7 +1034,6 @@ fn cmd_auto_node(paths: &Paths, app_config: &AppConfig, filter: Option<&str>) ->
             );
             return Ok(());
         }
-        progress.finish();
     }
 
     Err(anyhow!("没有找到可连通节点"))
@@ -1256,24 +1273,39 @@ impl Controller {
     }
 }
 
+/// 一个批次的测速结果：找到最快节点 / 全部不可用 / 被 Esc 跳过。
+enum BatchOutcome {
+    Best(DelayResult),
+    Empty,
+    Cancelled,
+}
+
+/// 并发测速一批节点。工作线程后台拨测，spinner 在独立线程渲染，主线程只轮询键盘并
+/// 收集结果：Esc 取消当前批次立即返回（不等待在途拨测），Ctrl+C 恢复终端后退出。
 fn test_batch(
     controller: &Controller,
     nodes: Vec<String>,
     concurrency: usize,
     timeout_ms: u64,
-    progress: Option<ProgressBar>,
-) -> Result<Option<DelayResult>> {
+    label: &str,
+) -> BatchOutcome {
+    let total = nodes.len() as u64;
     let controller = Arc::new(controller.clone());
     let queue = Arc::new(Mutex::new(nodes.into_iter()));
-    let progress = progress.map(Arc::new);
+    let cancel = Arc::new(AtomicBool::new(false));
+    let done = Arc::new(AtomicU64::new(0));
     let (tx, rx) = mpsc::channel();
-    let worker_count = min(concurrency, queue.lock().unwrap().len()).max(1);
+    let worker_count = min(concurrency, total as usize).max(1);
     for _ in 0..worker_count {
         let controller = Arc::clone(&controller);
         let queue = Arc::clone(&queue);
+        let cancel = Arc::clone(&cancel);
+        let done = Arc::clone(&done);
         let tx = tx.clone();
-        let progress = progress.clone();
         thread::spawn(move || loop {
+            if cancel.load(Ordering::Relaxed) {
+                break;
+            }
             let node = {
                 let mut queue = queue.lock().unwrap();
                 queue.next()
@@ -1284,13 +1316,172 @@ fn test_batch(
             if let Ok(delay) = controller.delay(&node, timeout_ms) {
                 let _ = tx.send(DelayResult { node, delay });
             }
-            if let Some(progress) = &progress {
-                progress.inc(1);
-            }
+            done.fetch_add(1, Ordering::Relaxed);
         });
     }
     drop(tx);
-    Ok(rx.into_iter().min_by_key(|result| result.delay))
+
+    let mut probe = Probe::start(label, total, Arc::clone(&done));
+    // Esc/Ctrl+C 需要在原始模式下逐键读取；退出作用域自动恢复终端。
+    let raw_ok = std::io::stdin().is_terminal() && enable_raw_mode().is_ok();
+    let _guard = raw_ok.then_some(RawModeGuard);
+
+    let mut best: Option<DelayResult> = None;
+    let mut cancelled = false;
+    let collect = |best: &mut Option<DelayResult>| {
+        while let Ok(result) = rx.try_recv() {
+            if best.as_ref().is_none_or(|b| result.delay < b.delay) {
+                *best = Some(result);
+            }
+        }
+    };
+    loop {
+        if raw_ok && event::poll(Duration::from_millis(120)).unwrap_or(false) {
+            if let Ok(Event::Key(k)) = event::read() {
+                if k.kind != KeyEventKind::Release {
+                    if k.code == KeyCode::Esc {
+                        cancel.store(true, Ordering::Relaxed);
+                        cancelled = true;
+                    } else if k.modifiers.contains(KeyModifiers::CONTROL)
+                        && k.code == KeyCode::Char('c')
+                    {
+                        cancel.store(true, Ordering::Relaxed);
+                        probe.finish();
+                        let _ = disable_raw_mode();
+                        eprintln!();
+                        std::process::exit(130);
+                    }
+                }
+            }
+        } else if !raw_ok {
+            thread::sleep(Duration::from_millis(120));
+        }
+
+        collect(&mut best);
+        if cancelled || done.load(Ordering::Relaxed) >= total {
+            collect(&mut best);
+            break;
+        }
+    }
+    probe.finish();
+
+    if cancelled {
+        BatchOutcome::Cancelled
+    } else if let Some(best) = best {
+        BatchOutcome::Best(best)
+    } else {
+        BatchOutcome::Empty
+    }
+}
+
+/// 退出作用域时恢复终端 cooked 模式，即使发生 panic 也不会把终端留在原始模式。
+struct RawModeGuard;
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+    }
+}
+
+/// 单行测速进度指示器：spinner 在独立后台线程按 ~80ms 节奏刷新，因此主线程无论
+/// 阻塞与否都不会让进度看起来卡死；仅当 stderr 是 tty 时才渲染。
+struct Probe {
+    finished: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+    animate: bool,
+}
+
+impl Probe {
+    fn start(label: &str, total: u64, done: Arc<AtomicU64>) -> Probe {
+        let animate = std::io::stderr().is_terminal();
+        let finished = Arc::new(AtomicBool::new(false));
+        let handle = if animate {
+            let finished = Arc::clone(&finished);
+            let label = label.to_string();
+            let width = terminal_width();
+            Some(thread::spawn(move || {
+                let mut frame = 0usize;
+                while !finished.load(Ordering::Relaxed) {
+                    let d = done.load(Ordering::Relaxed).min(total);
+                    let line = render_probe_line(spinner_frame(frame), &label, d, total, width);
+                    let mut stderr = std::io::stderr();
+                    let _ = write!(stderr, "\r\x1b[K{line}");
+                    let _ = stderr.flush();
+                    frame += 1;
+                    thread::sleep(Duration::from_millis(80));
+                }
+            }))
+        } else {
+            None
+        };
+        Probe {
+            finished,
+            handle,
+            animate,
+        }
+    }
+
+    /// 停止动画线程并清掉当前进度行，让下一批次或结果从干净的行开始。
+    fn finish(&mut self) {
+        self.finished.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+        if self.animate {
+            let mut stderr = std::io::stderr();
+            let _ = write!(stderr, "\r\x1b[K");
+            let _ = stderr.flush();
+        }
+    }
+}
+
+impl Drop for Probe {
+    fn drop(&mut self) {
+        if self.handle.is_some() {
+            self.finish();
+        }
+    }
+}
+
+/// 渲染一行测速进度：`<spinner> 节点延迟测试: {label}... {bar} {done}/{total}`。
+/// 进度条宽度随终端宽度自适应，先收缩进度条，实在放不下才截断标签，保证不换行。
+fn render_probe_line(spinner: &str, label: &str, done: u64, total: u64, width: usize) -> String {
+    let width = width.max(10);
+    let count = format!("{done}/{total}");
+    let count_w = display_width(&count);
+    let prefix = format!("节点延迟测试: {label}...");
+    // "{spinner} {prefix} {bar} {count}" 中除 prefix/bar 外的固定宽度：spinner + 3 空格 + count
+    let scaffold = 4 + count_w;
+    let budget = width.saturating_sub(scaffold);
+    let prefix_w = display_width(&prefix);
+    let (prefix, bar_w) = if prefix_w <= budget {
+        (prefix, (budget - prefix_w).min(36))
+    } else {
+        (truncate_to_width(&prefix, budget), 0)
+    };
+    let head = format!("{ANSI_SPINNER}{spinner}{ANSI_RESET} {prefix}");
+    if bar_w == 0 {
+        format!("{head} {count}")
+    } else {
+        format!("{head} {} {count}", render_bar(bar_w, done, total))
+    }
+}
+
+fn render_bar(width: usize, done: u64, total: u64) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let filled = if total == 0 {
+        width
+    } else {
+        ((done as u128 * width as u128) / total as u128) as usize
+    }
+    .min(width);
+    format!(
+        "{ANSI_BAR_FILLED}{}{ANSI_BAR_EMPTY}{}{ANSI_RESET}",
+        "━".repeat(filled),
+        "─".repeat(width - filled)
+    )
 }
 
 fn choose_from_list(
@@ -1356,16 +1547,6 @@ fn print_interactive_error(
         )
     );
     Ok(())
-}
-
-fn progress_bar(label: &str, len: u64) -> ProgressBar {
-    let progress = ProgressBar::new(len);
-    let style = ProgressStyle::with_template("{prefix:.bold} {bar:36.cyan/blue} {pos}/{len}")
-        .unwrap_or_else(|_| ProgressStyle::default_bar())
-        .progress_chars("━━╾─");
-    progress.set_style(style);
-    progress.set_prefix(format!("节点延迟测试：{label}"));
-    progress
 }
 
 pub fn parse_controller_json_response(output: &[u8]) -> Result<Option<serde_json::Value>> {
@@ -1745,6 +1926,45 @@ mod tests {
             output.push(ch);
         }
         output
+    }
+
+    #[test]
+    fn spinner_frame_cycles() {
+        assert_eq!(spinner_frame(0), SPINNER_FRAMES[0]);
+        assert_eq!(spinner_frame(10), SPINNER_FRAMES[0]);
+        assert_eq!(spinner_frame(11), SPINNER_FRAMES[1]);
+    }
+
+    #[test]
+    fn probe_line_shows_spinner_label_and_count() {
+        let line = render_probe_line("⠋", "日本", 12, 36, 80);
+        let plain = strip_ansi(&line);
+        assert!(plain.starts_with("⠋ "));
+        assert!(plain.contains("节点延迟测试: 日本..."));
+        assert!(plain.contains("12/36"));
+        assert!(plain.contains('━') || plain.contains('─'));
+    }
+
+    #[test]
+    fn probe_line_bar_shrinks_and_never_overflows_width() {
+        for width in [20usize, 24, 30, 40, 60, 80, 120] {
+            let line = render_probe_line("⠹", "新加坡 IPLC 专线中转", 3, 50, width);
+            let plain = strip_ansi(&line);
+            assert!(
+                display_width(&plain) <= width,
+                "width={width} rendered={} line={plain:?}",
+                display_width(&plain)
+            );
+        }
+    }
+
+    #[test]
+    fn probe_line_bar_fills_proportionally() {
+        let none = strip_ansi(&render_probe_line("⠋", "日本", 0, 10, 80));
+        let full = strip_ansi(&render_probe_line("⠋", "日本", 10, 10, 80));
+        assert!(!none.contains('━'));
+        assert!(!full.contains('─'));
+        assert!(full.contains('━'));
     }
 
     #[test]
