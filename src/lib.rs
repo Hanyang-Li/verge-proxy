@@ -1046,7 +1046,11 @@ fn cmd_auto_node(paths: &Paths, app_config: &AppConfig, filter: Option<&str>) ->
             test_batch(&controller, batch, concurrency, timeout_ms, &label)
         {
             controller.select_proxy(&group, &best.node)?;
-            let status = collect_status(paths, true).ok();
+            // 直接复用测速阶段刚测得的延迟，避免用更短的预算重测导致误报 timeout
+            let status = collect_status(paths, false).ok().map(|mut info| {
+                info.delay = Delay::Value(best.delay);
+                info
+            });
             println!(
                 "{}",
                 success_line(
