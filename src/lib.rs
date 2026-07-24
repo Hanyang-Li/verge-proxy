@@ -722,34 +722,58 @@ pub fn run() -> Result<()> {
     let paths = Paths::new()?;
     let app_config = read_app_config(&paths).unwrap_or_default();
 
-    match cli.command {
+    // start/stop/restart 的 stdout 会被 shell wrapper `eval` 执行，错误须以 `echo … / return 1`
+    // 形式输出；其余命令直接展示，错误统一按 error_line 风格（红 ✘）打到 stdout。两类都以退出码 1 结束。
+    let evaled = matches!(
+        cli.command,
+        Commands::Start | Commands::Stop | Commands::Restart
+    );
+    let result = match cli.command {
         Commands::Start => cmd_start(&paths, &app_config),
         Commands::Stop => cmd_stop(),
         Commands::Restart => cmd_restart(&paths, &app_config),
-        Commands::Status => {
-            let info = collect_status(&paths, true)?;
-            println!(
-                "{}",
-                format_status_prompt(
-                &info,
-                &app_config.prompt,
-                &app_config.tag_defaults(),
-                terminal_width(),
-                0,
-            )
-            );
-            Ok(())
-        }
+        Commands::Status => cmd_status(&paths, &app_config),
         Commands::Mode => cmd_mode(&paths, &app_config),
         Commands::Group => cmd_group(&paths, &app_config),
         Commands::Node { filter } => cmd_node(&paths, &app_config, filter.as_deref()),
-        Commands::Port => {
-            println!("{}", read_port(&paths)?);
-            Ok(())
-        }
+        Commands::Port => cmd_port(&paths),
         Commands::AutoNode { filter } => cmd_auto_node(&paths, &app_config, filter.as_deref()),
         Commands::Install => cmd_install(&paths),
+    };
+
+    if let Err(error) = result {
+        let message = format!("错误：{error:#}");
+        if evaled {
+            emit_shell_error(&message, &app_config.prompt, &app_config.tag_defaults());
+        } else {
+            println!(
+                "{}",
+                error_line(&message, None, &app_config.prompt, &app_config.tag_defaults())
+            );
+        }
+        std::process::exit(1);
     }
+    Ok(())
+}
+
+fn cmd_status(paths: &Paths, app_config: &AppConfig) -> Result<()> {
+    let info = collect_status(paths, true)?;
+    println!(
+        "{}",
+        format_status_prompt(
+            &info,
+            &app_config.prompt,
+            &app_config.tag_defaults(),
+            terminal_width(),
+            0,
+        )
+    );
+    Ok(())
+}
+
+fn cmd_port(paths: &Paths) -> Result<()> {
+    println!("{}", read_port(paths)?);
+    Ok(())
 }
 
 impl Paths {
@@ -768,21 +792,26 @@ impl Paths {
     }
 }
 
+/// 以 shell 可 eval 的形式输出一条错误：`echo '✘ …'` + `return 1`。
+/// 供 start/restart/stop 使用——它们的 stdout 会被 shell wrapper `eval` 执行。
+fn emit_shell_error(message: &str, prompt: &PromptConfig, defaults: &TagDefaults) {
+    println!(
+        "echo {}",
+        shell_single_quote(&error_line(message, None, prompt, defaults))
+    );
+    println!("return 1 2>/dev/null || exit 1");
+}
+
 /// Emits an error and returns `true` when `proxy_name` is set to a value other
 /// than `verge`. An unset or empty `proxy_name` is allowed (returns `false`).
 fn proxy_name_conflict(prompt: &PromptConfig, defaults: &TagDefaults) -> bool {
     match env::var("proxy_name") {
         Ok(value) if !value.is_empty() && value != "verge" => {
-            println!(
-                "echo {}",
-                shell_single_quote(&error_line(
-                    &format!("proxy_name 当前为 {value}，非 verge，拒绝操作"),
-                    None,
-                    prompt,
-                    defaults
-                ))
+            emit_shell_error(
+                &format!("proxy_name 当前为 {value}，非 verge，拒绝操作"),
+                prompt,
+                defaults,
             );
-            println!("return 1 2>/dev/null || exit 1");
             true
         }
         _ => false,
@@ -798,16 +827,11 @@ fn cmd_start(paths: &Paths, app_config: &AppConfig) -> Result<()> {
         .filter(|name| env::var_os(name).is_some())
         .collect();
     if !occupied.is_empty() {
-        println!(
-            "echo {}",
-            shell_single_quote(&error_line(
-                "环境变量被占用，请执行 verge-proxy stop 后再次尝试",
-                None,
-                &app_config.prompt,
-                &app_config.tag_defaults()
-            ))
+        emit_shell_error(
+            "环境变量被占用，请执行 verge-proxy stop 后再次尝试",
+            &app_config.prompt,
+            &app_config.tag_defaults(),
         );
-        println!("return 1 2>/dev/null || exit 1");
         return Ok(());
     }
     emit_proxy_exports(paths, app_config, "命令行代理已开启")
