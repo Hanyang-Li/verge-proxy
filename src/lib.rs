@@ -1807,7 +1807,7 @@ verge-proxy() {{
 }}
 vp() {{
   (
-    eval "$(COLUMNS=${{COLUMNS:-80}} "{exe}" restart)" >&2 || exit
+    eval "$(COLUMNS=${{COLUMNS:-80}} "{exe}" restart -f)" >&2 || exit
     if [[ -n ${{aliases[$1]}} ]]; then
       eval "${{aliases[$1]}} ${{(j: :)${{(@q)@[2,-1]}}}}"
     else
@@ -2112,7 +2112,7 @@ mod tests {
             )
         );
         assert!(block.contains(
-            r#"eval "$(COLUMNS=${COLUMNS:-80} "/usr/local/bin/verge-proxy" restart)" >&2 || exit"#
+            r#"eval "$(COLUMNS=${COLUMNS:-80} "/usr/local/bin/verge-proxy" restart -f)" >&2 || exit"#
         ));
         assert!(block.contains(r#"*) COLUMNS=${COLUMNS:-80} "/usr/local/bin/verge-proxy" "$@" ;;"#));
         assert!(!block.contains("compinit"));

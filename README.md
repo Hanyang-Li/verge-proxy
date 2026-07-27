@@ -87,7 +87,7 @@ verge-proxy auto-node --filter 日本,新加坡
 
 ## vp
 
-`vp <命令>` 只给该命令所在的子 shell 设置代理，不影响当前 zsh 进程：
+`vp <命令>` 只给该命令所在的子 shell 设置代理（内部执行 `restart -f`，不受 `proxy_name` 检查影响），不影响当前 zsh 进程：
 
 ```sh
 vp curl https://example.com
