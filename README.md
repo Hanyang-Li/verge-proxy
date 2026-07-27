@@ -34,8 +34,8 @@ source ~/.zshrc
 
 ```sh
 verge-proxy start      # 设置当前 zsh 进程的代理环境变量，并显示 status
-verge-proxy stop       # 移除当前 zsh 进程的代理环境变量
-verge-proxy restart    # 重新读取端口并更新代理环境变量，并显示 status
+verge-proxy stop       # 移除当前 zsh 进程的代理环境变量（-f/--force 强制执行）
+verge-proxy restart    # 重新读取端口并更新代理环境变量，并显示 status（-f/--force 强制执行）
 verge-proxy status     # 用 prompt 显示 mode/group/node/delay/port，相邻 tag 紧挨排列，宽度不足时按段换行
 verge-proxy mode       # 交互切换 规则 / 全局 / 直连
 verge-proxy group      # 交互切换代理组，最多显示 10 行
@@ -44,6 +44,8 @@ verge-proxy port       # 只输出当前 mixed-port 数字
 verge-proxy auto-node  # 并发测速并切换到最快节点
 verge-proxy install    # 配置 ~/.config/verge-proxy、completion、~/.zshrc
 ```
+
+`stop` / `restart` 在 `proxy_name` 已被设为非 `verge` 的值时会拒绝执行；加 `--force` / `-f` 可跳过该检查强制执行。
 
 `port` 和 `status` 的端口都动态读取：优先从 controller 的 `/configs["mixed-port"]` 获取，失败时回退到 Clash Verge 配置文件中的 `mixed-port`。
 

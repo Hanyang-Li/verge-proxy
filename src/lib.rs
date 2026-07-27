@@ -633,9 +633,17 @@ enum Commands {
     /// 开启命令行代理：读取端口并导出 http/https/all_proxy 环境变量
     Start,
     /// 关闭命令行代理：移除代理相关环境变量
-    Stop,
+    Stop {
+        /// 跳过 proxy_name 检查强制执行
+        #[arg(long, short)]
+        force: bool,
+    },
     /// 重启命令行代理：重新读取端口并刷新环境变量
-    Restart,
+    Restart {
+        /// 跳过 proxy_name 检查强制执行
+        #[arg(long, short)]
+        force: bool,
+    },
     /// 查看当前状态：模式 / 代理组 / 节点 / 延迟 / 端口
     Status,
     /// 交互切换代理模式：规则 / 全局 / 直连
@@ -728,12 +736,12 @@ pub fn run() -> Result<()> {
     // 形式输出；其余命令直接展示，错误统一按 error_line 风格（红 ✘）打到 stdout。两类都以退出码 1 结束。
     let evaled = matches!(
         cli.command,
-        Commands::Start | Commands::Stop | Commands::Restart
+        Commands::Start | Commands::Stop { .. } | Commands::Restart { .. }
     );
     let result = match cli.command {
         Commands::Start => cmd_start(&paths, &app_config),
-        Commands::Stop => cmd_stop(),
-        Commands::Restart => cmd_restart(&paths, &app_config),
+        Commands::Stop { force } => cmd_stop(force),
+        Commands::Restart { force } => cmd_restart(&paths, &app_config, force),
         Commands::Status => cmd_status(&paths, &app_config),
         Commands::Mode => cmd_mode(&paths, &app_config),
         Commands::Group => cmd_group(&paths, &app_config),
@@ -841,8 +849,8 @@ fn cmd_start(paths: &Paths, app_config: &AppConfig) -> Result<()> {
     emit_proxy_exports(paths, app_config, "命令行代理已开启")
 }
 
-fn cmd_stop() -> Result<()> {
-    if proxy_name_conflict(&PromptConfig::default(), &TagDefaults::default()) {
+fn cmd_stop(force: bool) -> Result<()> {
+    if !force && proxy_name_conflict(&PromptConfig::default(), &TagDefaults::default()) {
         return Ok(());
     }
     println!("unset http_proxy https_proxy all_proxy no_proxy proxy_name");
@@ -858,8 +866,8 @@ fn cmd_stop() -> Result<()> {
     Ok(())
 }
 
-fn cmd_restart(paths: &Paths, app_config: &AppConfig) -> Result<()> {
-    if proxy_name_conflict(&app_config.prompt, &app_config.tag_defaults()) {
+fn cmd_restart(paths: &Paths, app_config: &AppConfig, force: bool) -> Result<()> {
+    if !force && proxy_name_conflict(&app_config.prompt, &app_config.tag_defaults()) {
         return Ok(());
     }
     emit_proxy_exports(paths, app_config, "命令行代理已重启")
@@ -1714,6 +1722,7 @@ _verge-proxy() {
     cmds) _describe 'command' commands ;;
     args)
       case "$words[1]" in
+        stop|restart) _arguments '(-f --force)'{-f,--force}'[跳过 proxy_name 检查强制执行]' ;;
         node) _arguments '--filter=[按关键字预筛节点]' ;;
         auto-node) _arguments '--filter=[限制测速范围，逗号分隔]' ;;
       esac
@@ -1935,6 +1944,27 @@ mod tests {
             output.push(ch);
         }
         output
+    }
+
+    #[test]
+    fn stop_and_restart_accept_force_flag() {
+        assert!(matches!(
+            Cli::try_parse_from(["verge-proxy", "stop"]).unwrap().command,
+            Commands::Stop { force: false }
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["verge-proxy", "stop", "--force"])
+                .unwrap()
+                .command,
+            Commands::Stop { force: true }
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["verge-proxy", "restart", "-f"])
+                .unwrap()
+                .command,
+            Commands::Restart { force: true }
+        ));
+        assert!(Cli::try_parse_from(["verge-proxy", "start", "--force"]).is_err());
     }
 
     #[test]
